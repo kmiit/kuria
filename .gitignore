@@ -1,0 +1,6 @@
+/target
+/data
+/static
+/config.toml
+*.db
+*.log

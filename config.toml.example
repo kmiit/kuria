@@ -1,0 +1,45 @@
+# Kuria Mail Server Configuration
+
+[server]
+# 主机名 (应为您的邮件服务器域名)
+hostname = "mail.example.com"
+# 数据目录
+data_dir = "./data"
+
+[smtp]
+# SMTP 监听地址
+listen_addr = "0.0.0.0:25"
+# SMTPS 监听地址 (隐式 TLS)
+listen_addr_tls = "0.0.0.0:465"
+# 是否启用 STARTTLS
+enable_starttls = true
+
+[imap]
+# IMAP 监听地址
+listen_addr = "0.0.0.0:143"
+# IMAPS 监听地址 (隐式 TLS)
+listen_addr_tls = "0.0.0.0:993"
+# 是否启用 STARTTLS
+enable_starttls = true
+
+[web]
+# Web 管理界面监听地址
+listen_addr = "0.0.0.0:8080"
+# JWT 密钥 (请在生产环境中更改)
+jwt_secret = "change-me-in-production"
+
+[database]
+# SQLite 数据库文件路径
+url = "sqlite:./data/kuria.db?mode=rwc"
+
+[tls]
+# TLS 证书文件路径
+cert_path = "./data/certs/cert.pem"
+# TLS 私钥文件路径
+key_path = "./data/certs/key.pem"
+
+[dkim]
+# DKIM 密钥大小 (bits)
+key_size = 2048
+# DKIM 选择器
+selector = "kuria"

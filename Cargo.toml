@@ -1,0 +1,75 @@
+[package]
+name = "kuria"
+version = "0.1.0"
+edition = "2024"
+description = "A lightweight, self-hosted email server written in Rust"
+license = "MIT"
+
+[[bin]]
+name = "kuria"
+path = "src/main.rs"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# SMTP client (sending)
+lettre = { version = "0.11", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "smtp-transport", "builder", "hostname", "dkim"] }
+
+# Email parsing
+mail-parser = "0.11"
+mail-builder = "0.4"
+
+# Email authentication (DKIM/SPF/DMARC)
+# mail-auth = "0.4"  # TODO: enable when needed
+
+# Web framework
+axum = { version = "0.8", features = ["macros"] }
+axum-extra = { version = "0.12", features = ["cookie"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "fs", "trace"] }
+
+# Database
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "chrono", "json"] }
+
+# TLS
+tokio-rustls = "0.26"
+rustls-pemfile = "2"
+rustls = "0.23"
+
+# DNS resolution
+hickory-resolver = "0.26"
+
+# Serialization / config
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+thiserror = "2"
+
+# Authentication / JWT
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+bcrypt = "0.19"
+rand = "0.10"
+
+# Template rendering
+askama = "0.16"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+uuid = { version = "1", features = ["v4"] }
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
+bytes = "1"
+futures = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = true
+strip = true
