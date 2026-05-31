@@ -42,11 +42,18 @@ async function checkInitialized() {
 
 // Auth guard with setup check
 router.beforeEach(async (to) => {
-  // Always allow setup page
-  if (to.name === 'setup') return
-
-  // Check if system needs setup
   const isInit = await checkInitialized()
+
+  // If already initialized, block access to setup page
+  if (to.name === 'setup') {
+    if (isInit) {
+      const token = localStorage.getItem('token')
+      return { name: token ? 'dashboard' : 'login' }
+    }
+    return
+  }
+
+  // If not initialized, redirect to setup
   if (!isInit) {
     return { name: 'setup' }
   }
