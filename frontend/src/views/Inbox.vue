@@ -78,29 +78,30 @@ onMounted(loadEmails)
       <MiuixCard
         v-for="email in emails"
         :key="email.id"
-        class="email-item"
         :class="{ unread: !email.is_read }"
         @click="openEmail(email)"
       >
-        <div class="email-avatar">
-          {{ email.sender?.charAt(0)?.toUpperCase() || '?' }}
-        </div>
-        <div class="email-content">
-          <div class="email-header">
-            <span class="email-sender">{{ email.sender }}</span>
-            <span class="email-date">{{ formatDate(email.created_at) }}</span>
+        <div class="card-inner email-item">
+          <div class="email-avatar">
+            {{ email.sender?.charAt(0)?.toUpperCase() || '?' }}
           </div>
-          <div class="email-subject">{{ email.subject || '(无主题)' }}</div>
-          <div class="email-preview">
-            {{ (email.body_text || '').substring(0, 100) }}
+          <div class="email-content">
+            <div class="email-header">
+              <span class="email-sender">{{ email.sender }}</span>
+              <span class="email-date">{{ formatDate(email.created_at) }}</span>
+            </div>
+            <div class="email-subject">{{ email.subject || '(无主题)' }}</div>
+            <div class="email-preview">
+              {{ (email.body_text || '').substring(0, 100) }}
+            </div>
           </div>
+          <MiuixButton
+            class="delete-btn"
+            @click.stop="deleteEmail(email.id)"
+          >
+            🗑️
+          </MiuixButton>
         </div>
-        <MiuixButton
-          class="delete-btn"
-          @click.stop="deleteEmail(email.id)"
-        >
-          🗑️
-        </MiuixButton>
       </MiuixCard>
     </div>
 
@@ -125,7 +126,8 @@ onMounted(loadEmails)
 <style scoped>
 .inbox h1 {
   font-size: 24px;
-  color: var(--m-color-text, #1a1a1a);
+  font-weight: 600;
+  color: var(--m-color-text);
 }
 
 .header {
@@ -138,40 +140,38 @@ onMounted(loadEmails)
 .loading,
 .empty {
   text-align: center;
-  padding: 60px 20px;
-  color: var(--m-color-text-secondary, #666);
+  padding: 80px 20px;
+  color: var(--m-color-text-secondary);
 }
 
 .empty-icon {
-  font-size: 48px;
-  margin-bottom: 16px;
+  font-size: 56px;
+  margin-bottom: 20px;
+}
+
+.card-inner {
+  padding: 20px;
 }
 
 .email-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
 }
 
 .email-item {
   display: flex;
   align-items: center;
   gap: 16px;
-  padding: 16px;
   cursor: pointer;
-  transition: all 0.2s;
 }
 
-.email-item:hover {
-  transform: translateY(-1px);
+.unread {
+  border-left: 3px solid var(--m-color-primary);
 }
 
-.email-item.unread {
-  border-left: 3px solid var(--m-color-primary, #4a90d9);
-}
-
-.email-item.unread .email-sender,
-.email-item.unread .email-subject {
+.unread .email-sender,
+.unread .email-subject {
   font-weight: 600;
 }
 
@@ -179,7 +179,7 @@ onMounted(loadEmails)
   width: 44px;
   height: 44px;
   border-radius: 50%;
-  background: var(--m-color-primary, #4a90d9);
+  background: var(--m-color-primary);
   color: white;
   display: flex;
   align-items: center;
@@ -202,18 +202,18 @@ onMounted(loadEmails)
 
 .email-sender {
   font-size: 14px;
-  color: var(--m-color-text, #1a1a1a);
+  color: var(--m-color-text);
 }
 
 .email-date {
   font-size: 12px;
-  color: var(--m-color-text-secondary, #666);
+  color: var(--m-color-text-secondary);
   flex-shrink: 0;
 }
 
 .email-subject {
   font-size: 15px;
-  color: var(--m-color-text, #1a1a1a);
+  color: var(--m-color-text);
   margin-bottom: 4px;
   white-space: nowrap;
   overflow: hidden;
@@ -222,7 +222,7 @@ onMounted(loadEmails)
 
 .email-preview {
   font-size: 13px;
-  color: var(--m-color-text-secondary, #666);
+  color: var(--m-color-text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -245,7 +245,7 @@ onMounted(loadEmails)
 .detail-header {
   margin-bottom: 16px;
   font-size: 14px;
-  color: var(--m-color-text-secondary, #666);
+  color: var(--m-color-text-secondary);
 }
 
 .detail-header div {
@@ -255,6 +255,6 @@ onMounted(loadEmails)
 .detail-body {
   white-space: pre-wrap;
   line-height: 1.6;
-  color: var(--m-color-text, #1a1a1a);
+  color: var(--m-color-text);
 }
 </style>

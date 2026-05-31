@@ -62,18 +62,20 @@ onMounted(loadDomains)
     </div>
 
     <div v-else class="domain-list">
-      <MiuixCard v-for="domain in domains" :key="domain.id" class="domain-card">
-        <div class="domain-info">
-          <div class="domain-icon">🌐</div>
-          <div>
-            <div class="domain-name">{{ domain.domain_name }}</div>
-            <div class="domain-detail">
-              DKIM 选择器：{{ domain.dkim_selector || '未配置' }}
+      <MiuixCard v-for="domain in domains" :key="domain.id">
+        <div class="card-inner domain-card">
+          <div class="domain-info">
+            <div class="domain-icon">🌐</div>
+            <div>
+              <div class="domain-name">{{ domain.domain_name }}</div>
+              <div class="domain-detail">
+                DKIM 选择器：{{ domain.dkim_selector || '未配置' }}
+              </div>
             </div>
           </div>
-        </div>
-        <div class="domain-actions">
-          <MiuixButton @click="deleteDomain(domain.id, domain.domain_name)">删除</MiuixButton>
+          <div class="domain-actions">
+            <MiuixButton @click="deleteDomain(domain.id, domain.domain_name)">删除</MiuixButton>
+          </div>
         </div>
       </MiuixCard>
     </div>
@@ -94,7 +96,8 @@ onMounted(loadDomains)
 <style scoped>
 .domains h1 {
   font-size: 24px;
-  color: var(--m-color-text, #1a1a1a);
+  font-weight: 600;
+  color: var(--m-color-text);
 }
 
 .header {
@@ -107,13 +110,17 @@ onMounted(loadDomains)
 .loading,
 .empty {
   text-align: center;
-  padding: 60px 20px;
-  color: var(--m-color-text-secondary, #666);
+  padding: 80px 20px;
+  color: var(--m-color-text-secondary);
 }
 
 .empty-icon {
-  font-size: 48px;
-  margin-bottom: 16px;
+  font-size: 56px;
+  margin-bottom: 20px;
+}
+
+.card-inner {
+  padding: 24px;
 }
 
 .domain-list {
@@ -126,7 +133,6 @@ onMounted(loadDomains)
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 20px;
 }
 
 .domain-info {
@@ -142,12 +148,12 @@ onMounted(loadDomains)
 .domain-name {
   font-size: 16px;
   font-weight: 600;
-  color: var(--m-color-text, #1a1a1a);
+  color: var(--m-color-text);
 }
 
 .domain-detail {
   font-size: 13px;
-  color: var(--m-color-text-secondary, #666);
+  color: var(--m-color-text-secondary);
   margin-top: 4px;
 }
 

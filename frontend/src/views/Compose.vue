@@ -46,34 +46,36 @@ async function handleSend() {
   <div class="compose">
     <h1>写邮件</h1>
 
-    <MiuixCard class="compose-card">
-      <div class="form-group">
-        <label>收件人</label>
-        <MiuixInput v-model="to" placeholder="多个收件人用逗号分隔" />
-      </div>
+    <MiuixCard>
+      <div class="card-inner compose-card">
+        <div class="form-group">
+          <label>收件人</label>
+          <MiuixInput v-model="to" placeholder="多个收件人用逗号分隔" />
+        </div>
 
-      <div class="form-group">
-        <label>主题</label>
-        <MiuixInput v-model="subject" placeholder="邮件主题" />
-      </div>
+        <div class="form-group">
+          <label>主题</label>
+          <MiuixInput v-model="subject" placeholder="邮件主题" />
+        </div>
 
-      <div class="form-group">
-        <label>内容</label>
-        <textarea
-          v-model="body"
-          placeholder="输入邮件内容..."
-          rows="12"
-          class="body-textarea"
-        ></textarea>
-      </div>
+        <div class="form-group">
+          <label>内容</label>
+          <textarea
+            v-model="body"
+            placeholder="输入邮件内容..."
+            rows="12"
+            class="body-textarea"
+          ></textarea>
+        </div>
 
-      <div class="actions">
-        <p v-if="result" class="result" :class="{ success: result.startsWith('✅') }">
-          {{ result }}
-        </p>
-        <MiuixButton type="primary" :disabled="sending" @click="handleSend">
-          {{ sending ? '发送中...' : '📤 发送' }}
-        </MiuixButton>
+        <div class="actions">
+          <p v-if="result" class="result" :class="{ success: result.startsWith('✅') }">
+            {{ result }}
+          </p>
+          <MiuixButton type="primary" :disabled="sending" @click="handleSend">
+            {{ sending ? '发送中...' : '📤 发送' }}
+          </MiuixButton>
+        </div>
       </div>
     </MiuixCard>
   </div>
@@ -82,24 +84,28 @@ async function handleSend() {
 <style scoped>
 .compose h1 {
   font-size: 24px;
-  color: var(--m-color-text, #1a1a1a);
+  font-weight: 600;
+  color: var(--m-color-text);
   margin-bottom: 24px;
 }
 
+.card-inner {
+  padding: 28px;
+}
+
 .compose-card {
-  padding: 24px;
   max-width: 700px;
 }
 
 .form-group {
-  margin-bottom: 20px;
+  margin-bottom: 24px;
 }
 
 .form-group label {
   display: block;
   font-size: 14px;
   font-weight: 500;
-  color: var(--m-color-text, #1a1a1a);
+  color: var(--m-color-text);
   margin-bottom: 8px;
 }
 
@@ -111,14 +117,14 @@ async function handleSend() {
   font-size: 14px;
   font-family: inherit;
   resize: vertical;
-  background: var(--m-color-card, #fff);
-  color: var(--m-color-text, #1a1a1a);
+  background: var(--m-color-card);
+  color: var(--m-color-text);
   transition: border-color 0.2s;
 }
 
 .body-textarea:focus {
   outline: none;
-  border-color: var(--m-color-primary, #4a90d9);
+  border-color: var(--m-color-primary);
   border-width: 2px;
 }
 

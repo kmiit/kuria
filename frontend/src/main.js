@@ -68,8 +68,15 @@ router.beforeEach(async (to) => {
   }
 })
 
-// Set theme
-setThemeMode('system')
+// Restore theme from localStorage
+const savedTheme = localStorage.getItem('theme')
+if (savedTheme === 'dark') {
+  setThemeMode('dark')
+} else if (savedTheme === 'light') {
+  setThemeMode('light')
+} else {
+  setThemeMode('system')
+}
 
 const app = createApp(App)
 app.use(router)

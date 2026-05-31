@@ -81,21 +81,23 @@ onMounted(loadData)
     </div>
 
     <div v-else class="user-list">
-      <MiuixCard v-for="user in users" :key="user.id" class="user-card">
-        <div class="user-info">
-          <div class="user-avatar">
-            {{ user.is_admin ? '👑' : '👤' }}
-          </div>
-          <div>
-            <div class="user-email">{{ user.email }}</div>
-            <div class="user-meta">
-              <span class="domain-tag">{{ getDomainName(user.domain_id) }}</span>
-              <span v-if="user.is_admin" class="admin-tag">管理员</span>
+      <MiuixCard v-for="user in users" :key="user.id">
+        <div class="card-inner user-card">
+          <div class="user-info">
+            <div class="user-avatar">
+              {{ user.is_admin ? '👑' : '👤' }}
+            </div>
+            <div>
+              <div class="user-email">{{ user.email }}</div>
+              <div class="user-meta">
+                <span class="domain-tag">{{ getDomainName(user.domain_id) }}</span>
+                <span v-if="user.is_admin" class="admin-tag">管理员</span>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="user-actions">
-          <MiuixButton @click="deleteUser(user.id, user.email)">删除</MiuixButton>
+          <div class="user-actions">
+            <MiuixButton @click="deleteUser(user.id, user.email)">删除</MiuixButton>
+          </div>
         </div>
       </MiuixCard>
     </div>
@@ -135,7 +137,8 @@ onMounted(loadData)
 <style scoped>
 .users h1 {
   font-size: 24px;
-  color: var(--m-color-text, #1a1a1a);
+  font-weight: 600;
+  color: var(--m-color-text);
 }
 
 .header {
@@ -148,13 +151,17 @@ onMounted(loadData)
 .loading,
 .empty {
   text-align: center;
-  padding: 60px 20px;
-  color: var(--m-color-text-secondary, #666);
+  padding: 80px 20px;
+  color: var(--m-color-text-secondary);
 }
 
 .empty-icon {
-  font-size: 48px;
-  margin-bottom: 16px;
+  font-size: 56px;
+  margin-bottom: 20px;
+}
+
+.card-inner {
+  padding: 24px;
 }
 
 .user-list {
@@ -167,7 +174,6 @@ onMounted(loadData)
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 20px;
 }
 
 .user-info {
@@ -183,7 +189,7 @@ onMounted(loadData)
 .user-email {
   font-size: 16px;
   font-weight: 600;
-  color: var(--m-color-text, #1a1a1a);
+  color: var(--m-color-text);
 }
 
 .user-meta {
@@ -197,13 +203,13 @@ onMounted(loadData)
   padding: 2px 8px;
   background: var(--m-color-bg, #f0f0f0);
   border-radius: 4px;
-  color: var(--m-color-text-secondary, #666);
+  color: var(--m-color-text-secondary);
 }
 
 .admin-tag {
   font-size: 12px;
   padding: 2px 8px;
-  background: var(--m-color-primary, #4a90d9);
+  background: var(--m-color-primary);
   color: white;
   border-radius: 4px;
 }
@@ -229,7 +235,7 @@ onMounted(loadData)
 .form-group label {
   font-size: 14px;
   font-weight: 500;
-  color: var(--m-color-text, #1a1a1a);
+  color: var(--m-color-text);
 }
 
 .domain-select {
@@ -237,7 +243,7 @@ onMounted(loadData)
   border: 1px solid var(--m-color-border, #ddd);
   border-radius: 8px;
   font-size: 14px;
-  background: var(--m-color-card, #fff);
-  color: var(--m-color-text, #1a1a1a);
+  background: var(--m-color-card);
+  color: var(--m-color-text);
 }
 </style>

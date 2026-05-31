@@ -1,7 +1,7 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter, useRoute, RouterView } from 'vue-router'
-import { MiuixButton, setThemeMode } from 'miuix-vue'
+import { MiuixButton, MiuixSwitch, setThemeMode } from 'miuix-vue'
 
 const router = useRouter()
 const route = useRoute()
@@ -23,10 +23,59 @@ const navItems = [
 ]
 
 const isDark = ref(false)
+const themeMode = ref('system') // 'system' | 'light' | 'dark'
 
-function toggleTheme() {
-  isDark.value = !isDark.value
-  setThemeMode(isDark.value ? 'dark' : 'light')
+let mediaQuery = null
+let mediaHandler = null
+
+function applyTheme(mode) {
+  themeMode.value = mode
+  if (mode === 'system') {
+    const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches
+    isDark.value = prefersDark
+    setThemeMode('system')
+  } else {
+    isDark.value = mode === 'dark'
+    setThemeMode(mode)
+  }
+}
+
+onMounted(() => {
+  const saved = localStorage.getItem('theme')
+  if (saved === 'dark' || saved === 'light') {
+    applyTheme(saved)
+  } else {
+    // Default: follow system
+    applyTheme('system')
+  }
+
+  // Listen for system theme changes
+  mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
+  mediaHandler = (e) => {
+    if (themeMode.value === 'system') {
+      isDark.value = e.matches
+    }
+  }
+  mediaQuery.addEventListener('change', mediaHandler)
+})
+
+onUnmounted(() => {
+  if (mediaQuery && mediaHandler) {
+    mediaQuery.removeEventListener('change', mediaHandler)
+  }
+})
+
+function onThemeChange(val) {
+  isDark.value = val
+  const mode = val ? 'dark' : 'light'
+  themeMode.value = mode
+  setThemeMode(mode)
+  localStorage.setItem('theme', mode)
+}
+
+function resetTheme() {
+  localStorage.removeItem('theme')
+  applyTheme('system')
 }
 
 function logout() {
@@ -63,12 +112,16 @@ function logout() {
           <span class="user-avatar">👤</span>
           <span class="user-email">{{ user.email }}</span>
         </div>
-        <div class="footer-actions">
-          <MiuixButton @click="toggleTheme" style="flex: 1">
-            {{ isDark ? '☀️' : '🌙' }}
-          </MiuixButton>
-          <MiuixButton @click="logout" style="flex: 1">退出</MiuixButton>
+
+        <div class="theme-toggle">
+          <div class="theme-left" @click="resetTheme" title="跟随系统">
+            <span class="theme-icon">{{ isDark ? '🌙' : '☀️' }}</span>
+            <span class="theme-label">{{ themeMode === 'system' ? '跟随系统' : (isDark ? '暗色' : '亮色') }}</span>
+          </div>
+          <MiuixSwitch :modelValue="isDark" @update:modelValue="onThemeChange" />
         </div>
+
+        <MiuixButton class="logout-btn" @click="logout">退出登录</MiuixButton>
       </div>
     </aside>
 
@@ -83,12 +136,13 @@ function logout() {
 .layout {
   display: flex;
   min-height: 100vh;
+  background: var(--m-color-bg);
 }
 
 .sidebar {
   width: 240px;
-  background: var(--m-color-card, #fff);
-  border-right: 1px solid var(--m-color-border, #e0e0e0);
+  background: var(--m-color-card);
+  border-right: 1px solid var(--m-color-border);
   display: flex;
   flex-direction: column;
   position: fixed;
@@ -103,7 +157,7 @@ function logout() {
   display: flex;
   align-items: center;
   gap: 12px;
-  border-bottom: 1px solid var(--m-color-border, #e0e0e0);
+  border-bottom: 1px solid var(--m-color-border);
 }
 
 .logo-icon {
@@ -113,7 +167,7 @@ function logout() {
 .logo-text {
   font-size: 18px;
   font-weight: 600;
-  color: var(--m-color-text, #1a1a1a);
+  color: var(--m-color-text);
 }
 
 .nav {
@@ -121,71 +175,100 @@ function logout() {
   padding: 12px 8px;
   display: flex;
   flex-direction: column;
-  gap: 4px;
+  gap: 2px;
 }
 
 .nav-item {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 12px 16px;
+  padding: 10px 16px;
   border-radius: 10px;
   text-decoration: none;
-  color: var(--m-color-text-secondary, #666);
+  color: var(--m-color-text-secondary);
   font-size: 14px;
   transition: all 0.2s;
 }
 
 .nav-item:hover {
-  background: var(--m-color-hover, #f5f5f5);
-  color: var(--m-color-text, #1a1a1a);
+  background: var(--m-color-hover);
+  color: var(--m-color-text);
 }
 
 .nav-item.active {
-  background: var(--m-color-primary, #4a90d9);
+  background: var(--m-color-primary);
   color: white;
 }
 
 .nav-icon {
   font-size: 18px;
+  width: 24px;
+  text-align: center;
 }
 
 .sidebar-footer {
-  padding: 16px;
-  border-top: 1px solid var(--m-color-border, #e0e0e0);
+  padding: 12px;
+  border-top: 1px solid var(--m-color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
 }
 
 .user-info {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
-  padding: 8px;
-  background: var(--m-color-bg, #f5f5f5);
-  border-radius: 8px;
+  padding: 10px 12px;
+  background: var(--m-color-bg);
+  border-radius: 10px;
 }
 
 .user-avatar {
-  font-size: 20px;
+  font-size: 18px;
 }
 
 .user-email {
   font-size: 13px;
-  color: var(--m-color-text, #1a1a1a);
+  color: var(--m-color-text);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
 }
 
-.footer-actions {
+.theme-toggle {
   display: flex;
-  gap: 8px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: var(--m-color-bg);
+  border-radius: 10px;
+}
+
+.theme-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.theme-icon {
+  font-size: 16px;
+}
+
+.theme-label {
+  font-size: 13px;
+  color: var(--m-color-text);
+}
+
+.logout-btn {
+  width: 100%;
 }
 
 .main {
   flex: 1;
   margin-left: 240px;
-  padding: 24px;
+  padding: 24px 32px;
   min-height: 100vh;
 }
 </style>
