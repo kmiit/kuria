@@ -116,8 +116,10 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    // In debug mode, start the Vite dev server for frontend hot-reload
-    if cfg!(debug_assertions) {
+    // In debug mode, start the Vite dev server for frontend hot-reload.
+    // The CARGO env var is set by `cargo run` but not when running the binary directly.
+    let is_cargo_run = std::env::var("CARGO").is_ok();
+    if cfg!(debug_assertions) && is_cargo_run {
         start_vite_dev_server();
     }
 
@@ -158,7 +160,7 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("  SMTP: {}", config.smtp.listen_addr);
     tracing::info!("  IMAP: {}", config.imap.listen_addr);
     tracing::info!("  Web:  http://{}", config.web.listen_addr);
-    if cfg!(debug_assertions) {
+    if cfg!(debug_assertions) && is_cargo_run {
         tracing::info!("  Frontend (HMR): http://localhost:3000");
     }
 
