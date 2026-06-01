@@ -359,7 +359,7 @@ function copyToClipboard(text) {
 .setup-card {
   padding: 40px;
   border-radius: 20px;
-  background: white;
+  background: var(--m-color-card);
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
 }
 
@@ -375,12 +375,12 @@ function copyToClipboard(text) {
 
 h1 {
   font-size: 24px;
-  color: #1a1a1a;
+  color: var(--m-color-text);
   margin-bottom: 8px;
 }
 
 .subtitle {
-  color: #666;
+  color: var(--m-color-text-secondary);
   margin-bottom: 32px;
 }
 
@@ -397,7 +397,7 @@ h1 {
   align-items: flex-start;
   gap: 12px;
   padding: 12px;
-  background: #f8f9fa;
+  background: var(--m-color-bg);
   border-radius: 10px;
 }
 
@@ -408,13 +408,13 @@ h1 {
 
 .feature-title {
   font-weight: 600;
-  color: #1a1a1a;
+  color: var(--m-color-text);
   margin-bottom: 2px;
 }
 
 .feature-desc {
   font-size: 13px;
-  color: #666;
+  color: var(--m-color-text-secondary);
 }
 
 .form-group {
@@ -426,13 +426,13 @@ h1 {
   display: block;
   font-size: 14px;
   font-weight: 500;
-  color: #1a1a1a;
+  color: var(--m-color-text);
   margin-bottom: 8px;
 }
 
 .hint {
   font-size: 12px;
-  color: #999;
+  color: var(--m-color-text-secondary);
   margin-top: 6px;
 }
 
@@ -451,7 +451,7 @@ h1 {
 
 .dns-info {
   text-align: left;
-  background: #f8f9fa;
+  background: var(--m-color-bg);
   border-radius: 12px;
   padding: 20px;
   margin-top: 24px;
@@ -459,12 +459,12 @@ h1 {
 
 .dns-info h3 {
   margin-bottom: 8px;
-  color: #1a1a1a;
+  color: var(--m-color-text);
 }
 
 .dns-hint {
   font-size: 13px;
-  color: #666;
+  color: var(--m-color-text-secondary);
   margin-bottom: 16px;
 }
 
@@ -475,10 +475,10 @@ h1 {
 }
 
 .dns-record {
-  background: white;
+  background: var(--m-color-card);
   border-radius: 8px;
   padding: 12px;
-  border: 1px solid #e0e0e0;
+  border: 1px solid var(--m-color-border);
 }
 
 .record-header {
@@ -500,8 +500,8 @@ h1 {
 .dns-record code {
   display: block;
   font-size: 12px;
-  color: #333;
-  background: #f5f5f5;
+  color: var(--m-color-text);
+  background: var(--m-color-bg);
   padding: 8px;
   border-radius: 4px;
   word-break: break-all;
@@ -510,7 +510,7 @@ h1 {
 
 .account-info {
   text-align: left;
-  background: #e8f5e9;
+  background: var(--m-color-bg);
   border-radius: 12px;
   padding: 20px;
   margin-top: 16px;
@@ -518,12 +518,12 @@ h1 {
 
 .account-info h3 {
   margin-bottom: 12px;
-  color: #1a1a1a;
+  color: var(--m-color-text);
 }
 
 .account-info p {
   margin-bottom: 8px;
-  color: #333;
+  color: var(--m-color-text);
   font-size: 14px;
 }
 </style>
