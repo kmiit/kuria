@@ -1,9 +1,10 @@
-use std::sync::Arc;
-use lettre::message::{header::ContentType, Mailbox, Message};
-use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
 use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::RData;
-use tracing::{info, debug};
+use lettre::message::{Mailbox, Message, header::ContentType};
+use lettre::{AsyncSmtpTransport, AsyncTransport, Tokio1Executor};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::error::KuriaError;
@@ -26,81 +27,118 @@ impl MailSender {
         body_text: Option<&str>,
         body_html: Option<&str>,
     ) -> anyhow::Result<()> {
-        let from_mailbox: Mailbox = from.parse()
+        let from_mailbox: Mailbox = from
+            .parse()
             .map_err(|e| KuriaError::Smtp(format!("Invalid from address: {}", e)))?;
 
-        let mut builder = Message::builder()
-            .from(from_mailbox)
-            .subject(subject);
-
+        // Group recipients by domain for proper MX resolution
+        let mut domain_groups: HashMap<String, Vec<String>> = HashMap::new();
         for rcpt in to {
-            let mailbox: Mailbox = rcpt.parse()
-                .map_err(|e| KuriaError::Smtp(format!("Invalid to address: {}", e)))?;
-            builder = builder.to(mailbox);
+            let domain = rcpt
+                .split('@')
+                .next_back()
+                .ok_or_else(|| KuriaError::Smtp("Invalid recipient address".to_string()))?
+                .to_string();
+            domain_groups.entry(domain).or_default().push(rcpt.clone());
         }
 
-        // Set message ID
-        let msg_id = format!(
-            "<{}.{}@{}>",
-            uuid::Uuid::new_v4(),
-            chrono::Utc::now().timestamp(),
-            self.config.server.hostname
-        );
-        builder = builder.message_id(Some(msg_id));
+        let mut errors = Vec::new();
 
-        let message = if let Some(html) = body_html {
-            if let Some(text) = body_text {
-                builder
-                    .multipart(
-                        lettre::message::MultiPart::alternative()
-                            .singlepart(
-                                lettre::message::SinglePart::builder()
-                                    .header(ContentType::TEXT_PLAIN)
-                                    .body(text.to_string()),
-                            )
-                            .singlepart(
-                                lettre::message::SinglePart::builder()
-                                    .header(ContentType::TEXT_HTML)
-                                    .body(html.to_string()),
-                            ),
-                    )
-                    .map_err(|e| KuriaError::Smtp(format!("Failed to build message: {}", e)))?
-            } else {
-                builder
-                    .header(ContentType::TEXT_HTML)
-                    .body(html.to_string())
-                    .map_err(|e| KuriaError::Smtp(format!("Failed to build message: {}", e)))?
+        for (domain, recipients) in &domain_groups {
+            // Build message with all recipients
+            let mut builder = Message::builder()
+                .from(from_mailbox.clone())
+                .subject(subject);
+
+            for rcpt in recipients {
+                let mailbox: Mailbox = rcpt
+                    .parse()
+                    .map_err(|e| KuriaError::Smtp(format!("Invalid to address: {}", e)))?;
+                builder = builder.to(mailbox);
             }
+
+            // Set message ID
+            let msg_id = format!(
+                "<{}.{}@{}>",
+                uuid::Uuid::new_v4(),
+                chrono::Utc::now().timestamp(),
+                self.config.server.hostname
+            );
+            builder = builder.message_id(Some(msg_id));
+
+            let message = if let Some(html) = body_html {
+                if let Some(text) = body_text {
+                    builder
+                        .multipart(
+                            lettre::message::MultiPart::alternative()
+                                .singlepart(
+                                    lettre::message::SinglePart::builder()
+                                        .header(ContentType::TEXT_PLAIN)
+                                        .body(text.to_string()),
+                                )
+                                .singlepart(
+                                    lettre::message::SinglePart::builder()
+                                        .header(ContentType::TEXT_HTML)
+                                        .body(html.to_string()),
+                                ),
+                        )
+                        .map_err(|e| KuriaError::Smtp(format!("Failed to build message: {}", e)))?
+                } else {
+                    builder
+                        .header(ContentType::TEXT_HTML)
+                        .body(html.to_string())
+                        .map_err(|e| KuriaError::Smtp(format!("Failed to build message: {}", e)))?
+                }
+            } else {
+                let text = body_text.unwrap_or("");
+                builder
+                    .header(ContentType::TEXT_PLAIN)
+                    .body(text.to_string())
+                    .map_err(|e| KuriaError::Smtp(format!("Failed to build message: {}", e)))?
+            };
+
+            // Resolve MX for this domain
+            let mx_host = self.resolve_mx(domain).await.unwrap_or_else(|| {
+                debug!("No MX record for {}, falling back to domain itself", domain);
+                domain.clone()
+            });
+
+            // Send via SMTP
+            match self.send_to_host(&mx_host, message).await {
+                Ok(_) => {
+                    info!(
+                        "Email sent from {} to {:?} via {}",
+                        from, recipients, mx_host
+                    );
+                }
+                Err(e) => {
+                    warn!("Failed to send to {} via {}: {}", domain, mx_host, e);
+                    errors.push(format!("{}: {}", domain, e));
+                }
+            }
+        }
+
+        if errors.is_empty() {
+            Ok(())
         } else {
-            let text = body_text.unwrap_or("");
-            builder
-                .header(ContentType::TEXT_PLAIN)
-                .body(text.to_string())
-                .map_err(|e| KuriaError::Smtp(format!("Failed to build message: {}", e)))?
-        };
+            Err(KuriaError::Smtp(format!(
+                "Failed to send to some domains: {}",
+                errors.join("; ")
+            ))
+            .into())
+        }
+    }
 
-        // Resolve MX records for the first recipient's domain
-        let domain = to[0]
-            .split('@')
-            .last()
-            .ok_or_else(|| KuriaError::Smtp("Invalid recipient address".to_string()))?;
-
-        let mx_host = self.resolve_mx(domain).await.unwrap_or_else(|| {
-            debug!("No MX record for {}, falling back to domain itself", domain);
-            domain.to_string()
-        });
-
-        // Send via SMTP
-        let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(mx_host)
+    async fn send_to_host(&self, host: &str, message: lettre::Message) -> anyhow::Result<()> {
+        let transport = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host.to_string())
             .port(25)
             .build();
 
         transport
             .send(message)
             .await
-            .map_err(|e| KuriaError::Smtp(format!("Failed to send email: {}", e)))?;
+            .map_err(|e| KuriaError::Smtp(format!("SMTP delivery to {} failed: {}", host, e)))?;
 
-        info!("Email sent from {} to {:?}", from, to);
         Ok(())
     }
 

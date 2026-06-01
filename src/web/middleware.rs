@@ -4,13 +4,13 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use jsonwebtoken::{decode, DecodingKey, Validation, Algorithm};
+use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 
 use super::router::AppState;
 
 #[derive(Debug, serde::Deserialize, serde::Serialize, Clone)]
 pub struct Claims {
-    pub sub: i64,       // user_id
+    pub sub: i64, // user_id
     pub email: String,
     pub is_admin: bool,
     pub exp: usize,
@@ -21,15 +21,24 @@ pub async fn auth_middleware(
     request: Request,
     next: Next,
 ) -> Result<Response, StatusCode> {
+    // Try Authorization header first, then query param
     let auth_header = request
         .headers()
         .get("Authorization")
         .and_then(|h| h.to_str().ok());
 
-    let token = match auth_header {
-        Some(header) if header.starts_with("Bearer ") => &header[7..],
-        _ => return Err(StatusCode::UNAUTHORIZED),
+    let token = if let Some(header) = auth_header {
+        header.strip_prefix("Bearer ")
+    } else {
+        // Fall back to query parameter (for attachment downloads)
+        request.uri().query().and_then(|q| {
+            q.split('&')
+                .find(|p| p.starts_with("token="))
+                .map(|p| &p[6..])
+        })
     };
+
+    let token = token.ok_or(StatusCode::UNAUTHORIZED)?;
 
     let token_data = decode::<Claims>(
         token,

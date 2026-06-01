@@ -33,6 +33,8 @@ export const api = {
   // Emails
   getEmails: (mailbox = 'INBOX', page = 1) =>
     request(`/api/emails?mailbox=${mailbox}&page=${page}`),
+  searchEmails: (query, page = 1) =>
+    request(`/api/emails?search=${encodeURIComponent(query)}&page=${page}`),
   getEmail: (id) => request(`/api/emails/${id}`),
   deleteEmail: (id) => request(`/api/emails/${id}`, { method: 'DELETE' }),
   markRead: (id) => request(`/api/emails/${id}/read`, { method: 'PUT' }),
@@ -46,6 +48,10 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(data),
     }),
+  getMailboxCounts: () => request('/api/emails/mailboxes'),
+
+  // Attachments
+  getAttachmentUrl: (id) => `/api/attachments/${id}`,
 
   // Domains
   getDomains: () => request('/api/domains'),
@@ -67,4 +73,9 @@ export const api = {
 
   // Settings
   getSettings: () => request('/api/settings'),
+  changePassword: (old_password, new_password) =>
+    request('/api/settings/password', {
+      method: 'POST',
+      body: JSON.stringify({ old_password, new_password }),
+    }),
 }

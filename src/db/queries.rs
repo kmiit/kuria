@@ -4,12 +4,11 @@ use super::models::*;
 
 // Domain queries
 pub async fn create_domain(pool: &SqlitePool, domain_name: &str) -> anyhow::Result<Domain> {
-    let domain = sqlx::query_as::<_, Domain>(
-        "INSERT INTO domains (domain_name) VALUES (?) RETURNING *",
-    )
-    .bind(domain_name)
-    .fetch_one(pool)
-    .await?;
+    let domain =
+        sqlx::query_as::<_, Domain>("INSERT INTO domains (domain_name) VALUES (?) RETURNING *")
+            .bind(domain_name)
+            .fetch_one(pool)
+            .await?;
     Ok(domain)
 }
 
@@ -26,25 +25,6 @@ pub async fn list_domains(pool: &SqlitePool) -> anyhow::Result<Vec<Domain>> {
         .fetch_all(pool)
         .await?;
     Ok(domains)
-}
-
-pub async fn update_domain_dkim(
-    pool: &SqlitePool,
-    domain_id: i64,
-    private_key: &str,
-    public_key: &str,
-    selector: &str,
-) -> anyhow::Result<()> {
-    sqlx::query(
-        "UPDATE domains SET dkim_private_key = ?, dkim_public_key = ?, dkim_selector = ? WHERE id = ?",
-    )
-    .bind(private_key)
-    .bind(public_key)
-    .bind(selector)
-    .bind(domain_id)
-    .execute(pool)
-    .await?;
-    Ok(())
 }
 
 pub async fn delete_domain(pool: &SqlitePool, domain_id: i64) -> anyhow::Result<()> {
@@ -107,6 +87,7 @@ pub async fn delete_user(pool: &SqlitePool, user_id: i64) -> anyhow::Result<()> 
 }
 
 // Email queries
+#[allow(clippy::too_many_arguments)]
 pub async fn save_email(
     pool: &SqlitePool,
     message_id: Option<&str>,
@@ -172,6 +153,21 @@ pub async fn mark_email_read(pool: &SqlitePool, email_id: i64) -> anyhow::Result
     Ok(())
 }
 
+pub async fn update_email_auth(
+    pool: &SqlitePool,
+    email_id: i64,
+    spf_result: Option<&str>,
+    dkim_signature: Option<&str>,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE emails SET spf_result = ?, dkim_signature = ? WHERE id = ?")
+        .bind(spf_result)
+        .bind(dkim_signature)
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn delete_email(pool: &SqlitePool, email_id: i64) -> anyhow::Result<()> {
     sqlx::query("UPDATE emails SET is_deleted = TRUE WHERE id = ?")
         .bind(email_id)
@@ -189,7 +185,11 @@ pub async fn move_email(pool: &SqlitePool, email_id: i64, mailbox: &str) -> anyh
     Ok(())
 }
 
-pub async fn count_emails_by_user(pool: &SqlitePool, user_id: i64, mailbox: &str) -> anyhow::Result<i64> {
+pub async fn count_emails_by_user(
+    pool: &SqlitePool,
+    user_id: i64,
+    mailbox: &str,
+) -> anyhow::Result<i64> {
     let count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM emails WHERE user_id = ? AND mailbox = ? AND is_deleted = FALSE",
     )
@@ -198,6 +198,76 @@ pub async fn count_emails_by_user(pool: &SqlitePool, user_id: i64, mailbox: &str
     .fetch_one(pool)
     .await?;
     Ok(count.0)
+}
+
+pub async fn search_emails(
+    pool: &SqlitePool,
+    user_id: i64,
+    query: &str,
+    limit: i64,
+    offset: i64,
+) -> anyhow::Result<Vec<Email>> {
+    let pattern = format!("%{}%", query);
+    let emails = sqlx::query_as::<_, Email>(
+        "SELECT * FROM emails WHERE user_id = ? AND is_deleted = FALSE
+         AND (subject LIKE ? OR sender LIKE ? OR body_text LIKE ?)
+         ORDER BY created_at DESC LIMIT ? OFFSET ?",
+    )
+    .bind(user_id)
+    .bind(&pattern)
+    .bind(&pattern)
+    .bind(&pattern)
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(pool)
+    .await?;
+    Ok(emails)
+}
+
+pub async fn count_search_emails(
+    pool: &SqlitePool,
+    user_id: i64,
+    query: &str,
+) -> anyhow::Result<i64> {
+    let pattern = format!("%{}%", query);
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM emails WHERE user_id = ? AND is_deleted = FALSE
+         AND (subject LIKE ? OR sender LIKE ? OR body_text LIKE ?)",
+    )
+    .bind(user_id)
+    .bind(&pattern)
+    .bind(&pattern)
+    .bind(&pattern)
+    .fetch_one(pool)
+    .await?;
+    Ok(count.0)
+}
+
+pub async fn get_mailbox_counts(
+    pool: &SqlitePool,
+    user_id: i64,
+) -> anyhow::Result<Vec<(String, i64, i64)>> {
+    let rows: Vec<(String, i64, i64)> = sqlx::query_as(
+        "SELECT mailbox, COUNT(*) as total, SUM(CASE WHEN is_read = FALSE THEN 1 ELSE 0 END) as unread
+         FROM emails WHERE user_id = ? AND is_deleted = FALSE GROUP BY mailbox",
+    )
+    .bind(user_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
+}
+
+pub async fn update_user_password(
+    pool: &SqlitePool,
+    user_id: i64,
+    password_hash: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE users SET password_hash = ? WHERE id = ?")
+        .bind(password_hash)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 // Attachment queries
@@ -225,11 +295,21 @@ pub async fn get_attachments_by_email(
     pool: &SqlitePool,
     email_id: i64,
 ) -> anyhow::Result<Vec<Attachment>> {
-    let attachments = sqlx::query_as::<_, Attachment>(
-        "SELECT * FROM attachments WHERE email_id = ?",
-    )
-    .bind(email_id)
-    .fetch_all(pool)
-    .await?;
+    let attachments =
+        sqlx::query_as::<_, Attachment>("SELECT * FROM attachments WHERE email_id = ?")
+            .bind(email_id)
+            .fetch_all(pool)
+            .await?;
     Ok(attachments)
+}
+
+pub async fn get_attachment_by_id(
+    pool: &SqlitePool,
+    attachment_id: i64,
+) -> anyhow::Result<Option<Attachment>> {
+    let attachment = sqlx::query_as::<_, Attachment>("SELECT * FROM attachments WHERE id = ?")
+        .bind(attachment_id)
+        .fetch_optional(pool)
+        .await?;
+    Ok(attachment)
 }

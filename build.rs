@@ -12,7 +12,9 @@ fn main() {
 
     // In debug mode, skip frontend build — the Vite dev server handles it at runtime
     if profile == "debug" {
-        println!("cargo:warning=Debug mode: skipping frontend build (Vite dev server will be used)");
+        println!(
+            "cargo:warning=Debug mode: skipping frontend build (Vite dev server will be used)"
+        );
         return;
     }
 
@@ -37,7 +39,10 @@ fn main() {
     // Try bun first, then npm/npx
     let package_manager = detect_package_manager(&frontend_dir);
 
-    println!("cargo:warning=Building frontend with {}...", package_manager);
+    println!(
+        "cargo:warning=Building frontend with {}...",
+        package_manager
+    );
 
     // Install dependencies if needed
     let node_modules = frontend_dir.join("node_modules");
@@ -59,7 +64,10 @@ fn main() {
                 println!("cargo:warning=Dependencies installed successfully");
             }
             Ok(s) => {
-                println!("cargo:warning=Failed to install dependencies (exit code: {})", s.code().unwrap_or(-1));
+                println!(
+                    "cargo:warning=Failed to install dependencies (exit code: {})",
+                    s.code().unwrap_or(-1)
+                );
                 return;
             }
             Err(e) => {
@@ -89,7 +97,10 @@ fn main() {
             let _ = fs::write(&marker, chrono_timestamp());
         }
         Ok(s) => {
-            println!("cargo:warning=Frontend build failed (exit code: {})", s.code().unwrap_or(-1));
+            println!(
+                "cargo:warning=Frontend build failed (exit code: {})",
+                s.code().unwrap_or(-1)
+            );
         }
         Err(e) => {
             println!("cargo:warning=Failed to build frontend: {}", e);
@@ -109,9 +120,7 @@ fn check_needs_rebuild(frontend_dir: &Path, dist_dir: &Path) -> bool {
         return true;
     }
 
-    let marker_time = fs::metadata(&marker)
-        .and_then(|m| m.modified())
-        .ok();
+    let marker_time = fs::metadata(&marker).and_then(|m| m.modified()).ok();
 
     let marker_time = match marker_time {
         Some(t) => t,

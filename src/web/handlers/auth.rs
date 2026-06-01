@@ -1,11 +1,11 @@
-use axum::{extract::State, Json};
 use axum::http::StatusCode;
+use axum::{Json, extract::State};
 use bcrypt::verify;
-use jsonwebtoken::{encode, Header, EncodingKey, Algorithm};
+use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
 use serde_json::json;
 
-use crate::db::queries;
 use crate::db::models::LoginRequest;
+use crate::db::queries;
 use crate::web::middleware::Claims;
 use crate::web::router::AppState;
 

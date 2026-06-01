@@ -1,7 +1,8 @@
 <script setup>
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute, RouterView } from 'vue-router'
 import { MiuixButton, MiuixSwitch, setThemeMode } from 'miuix-vue'
+import { api } from '../api'
 
 const router = useRouter()
 const route = useRoute()
@@ -20,13 +21,33 @@ const navItems = [
   { path: '/compose', name: '写邮件', icon: '✏️' },
   { path: '/domains', name: '域名', icon: '🌐' },
   { path: '/users', name: '用户', icon: '👥' },
+  { path: '/settings', name: '设置', icon: '⚙️' },
 ]
 
+const mailboxList = [
+  { id: 'INBOX', name: '收件箱', icon: '📥' },
+  { id: 'Sent', name: '已发送', icon: '📤' },
+  { id: 'Drafts', name: '草稿', icon: '📝' },
+  { id: 'Trash', name: '垃圾箱', icon: '🗑️' },
+  { id: 'Spam', name: '垃圾邮件', icon: '⚠️' },
+]
+
+const mailboxCounts = ref({})
 const isDark = ref(false)
-const themeMode = ref('system') // 'system' | 'light' | 'dark'
+const themeMode = ref('system')
+const sidebarOpen = ref(false)
 
 let mediaQuery = null
 let mediaHandler = null
+
+async function loadMailboxCounts() {
+  try {
+    const data = await api.getMailboxCounts()
+    mailboxCounts.value = data.mailboxes || {}
+  } catch (e) {
+    console.error(e)
+  }
+}
 
 function applyTheme(mode) {
   themeMode.value = mode
@@ -45,11 +66,9 @@ onMounted(() => {
   if (saved === 'dark' || saved === 'light') {
     applyTheme(saved)
   } else {
-    // Default: follow system
     applyTheme('system')
   }
 
-  // Listen for system theme changes
   mediaQuery = window.matchMedia('(prefers-color-scheme: dark)')
   mediaHandler = (e) => {
     if (themeMode.value === 'system') {
@@ -57,12 +76,22 @@ onMounted(() => {
     }
   }
   mediaQuery.addEventListener('change', mediaHandler)
+
+  loadMailboxCounts()
 })
 
 onUnmounted(() => {
   if (mediaQuery && mediaHandler) {
     mediaQuery.removeEventListener('change', mediaHandler)
   }
+})
+
+// Reload counts when navigating to inbox
+watch(() => route.path, (path) => {
+  if (path === '/inbox' || path.startsWith('/email/')) {
+    loadMailboxCounts()
+  }
+  sidebarOpen.value = false
 })
 
 function onThemeChange(val) {
@@ -83,12 +112,29 @@ function logout() {
   localStorage.removeItem('user')
   router.push('/login')
 }
+
+function goToMailbox(id) {
+  router.push({ path: '/inbox', query: { mailbox: id } })
+}
 </script>
 
 <template>
   <div class="layout">
+    <!-- Mobile header -->
+    <div class="mobile-header">
+      <MiuixButton class="menu-btn" @click="sidebarOpen = !sidebarOpen">☰</MiuixButton>
+      <span class="mobile-title">Kuria Mail</span>
+    </div>
+
+    <!-- Overlay for mobile -->
+    <div
+      v-if="sidebarOpen"
+      class="sidebar-overlay"
+      @click="sidebarOpen = false"
+    ></div>
+
     <!-- Sidebar -->
-    <aside class="sidebar">
+    <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="sidebar-header">
         <span class="logo-icon">📧</span>
         <span class="logo-text">Kuria Mail</span>
@@ -106,6 +152,24 @@ function logout() {
           <span class="nav-label">{{ item.name }}</span>
         </router-link>
       </nav>
+
+      <!-- Mailbox folders -->
+      <div class="mailboxes">
+        <div class="mailbox-title">邮箱文件夹</div>
+        <div
+          v-for="mb in mailboxList"
+          :key="mb.id"
+          class="mailbox-item"
+          :class="{ active: route.query.mailbox === mb.id || (!route.query.mailbox && mb.id === 'INBOX' && route.path === '/inbox') }"
+          @click="goToMailbox(mb.id)"
+        >
+          <span class="mailbox-icon">{{ mb.icon }}</span>
+          <span class="mailbox-name">{{ mb.name }}</span>
+          <span v-if="mailboxCounts[mb.id]?.unread" class="mailbox-badge">
+            {{ mailboxCounts[mb.id].unread }}
+          </span>
+        </div>
+      </div>
 
       <div class="sidebar-footer">
         <div class="user-info">
@@ -139,6 +203,14 @@ function logout() {
   background: var(--m-color-bg);
 }
 
+.mobile-header {
+  display: none;
+}
+
+.sidebar-overlay {
+  display: none;
+}
+
 .sidebar {
   width: 240px;
   background: var(--m-color-card);
@@ -150,6 +222,7 @@ function logout() {
   left: 0;
   bottom: 0;
   z-index: 10;
+  overflow-y: auto;
 }
 
 .sidebar-header {
@@ -171,7 +244,6 @@ function logout() {
 }
 
 .nav {
-  flex: 1;
   padding: 12px 8px;
   display: flex;
   flex-direction: column;
@@ -206,7 +278,69 @@ function logout() {
   text-align: center;
 }
 
+.mailboxes {
+  padding: 8px;
+  border-top: 1px solid var(--m-color-border);
+}
+
+.mailbox-title {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--m-color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  padding: 8px 16px 4px;
+}
+
+.mailbox-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 16px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 13px;
+  color: var(--m-color-text-secondary);
+  transition: all 0.2s;
+}
+
+.mailbox-item:hover {
+  background: var(--m-color-hover);
+  color: var(--m-color-text);
+}
+
+.mailbox-item.active {
+  background: var(--m-color-primary);
+  color: white;
+}
+
+.mailbox-icon {
+  font-size: 16px;
+  width: 20px;
+  text-align: center;
+}
+
+.mailbox-name {
+  flex: 1;
+}
+
+.mailbox-badge {
+  font-size: 11px;
+  font-weight: 600;
+  background: #e74c3c;
+  color: white;
+  padding: 1px 6px;
+  border-radius: 10px;
+  min-width: 18px;
+  text-align: center;
+}
+
+.mailbox-item.active .mailbox-badge {
+  background: rgba(255, 255, 255, 0.3);
+}
+
 .sidebar-footer {
+  margin-top: auto;
   padding: 12px;
   border-top: 1px solid var(--m-color-border);
   display: flex;
@@ -270,5 +404,56 @@ function logout() {
   margin-left: 240px;
   padding: 24px 32px;
   min-height: 100vh;
+}
+
+/* Mobile responsive */
+@media (max-width: 768px) {
+  .mobile-header {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    background: var(--m-color-card);
+    border-bottom: 1px solid var(--m-color-border);
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    z-index: 20;
+  }
+
+  .menu-btn {
+    padding: 6px 10px;
+    font-size: 20px;
+  }
+
+  .mobile-title {
+    font-size: 16px;
+    font-weight: 600;
+    color: var(--m-color-text);
+  }
+
+  .sidebar-overlay {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(0, 0, 0, 0.5);
+    z-index: 29;
+  }
+
+  .sidebar {
+    transform: translateX(-100%);
+    transition: transform 0.3s ease;
+    z-index: 30;
+  }
+
+  .sidebar.open {
+    transform: translateX(0);
+  }
+
+  .main {
+    margin-left: 0;
+    padding: 72px 16px 24px;
+  }
 }
 </style>

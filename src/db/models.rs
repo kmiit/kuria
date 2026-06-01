@@ -73,22 +73,18 @@ pub struct LoginRequest {
     pub password: String,
 }
 
-#[derive(Debug, Serialize)]
-pub struct LoginResponse {
-    pub token: String,
-    pub user: User,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct SendEmailRequest {
     pub to: Vec<String>,
+    pub cc: Option<Vec<String>>,
+    pub bcc: Option<Vec<String>>,
     pub subject: String,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct EmailListResponse {
-    pub emails: Vec<Email>,
-    pub total: i64,
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub old_password: String,
+    pub new_password: String,
 }

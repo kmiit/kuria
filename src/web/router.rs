@@ -1,14 +1,14 @@
-use std::sync::Arc;
 use axum::Router;
 use axum::response::Html;
-use axum::routing::{get, post, put, delete};
+use axum::routing::{delete, get, post, put};
+use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
 use tower_http::trace::TraceLayer;
 
-use crate::config::Config;
 use super::handlers::*;
 use super::middleware::auth_middleware;
+use crate::config::Config;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -28,17 +28,15 @@ async fn spa_index() -> Html<String> {
 <h1>📧 Kuria Mail Server</h1>
 <p>Frontend not built. Run: <code>cd frontend && npm run build</code></p>
 <p>API is available at <a href="/api/health">/api/health</a></p>
-</body></html>"#.to_string()
+</body></html>"#
+                .to_string()
         }
     };
     Html(html)
 }
 
 pub fn create_router(config: Arc<Config>, db: sqlx::SqlitePool) -> Router {
-    let state = AppState {
-        config,
-        db,
-    };
+    let state = AppState { config, db };
 
     // Public routes (no auth required)
     let public_routes = Router::new()
@@ -56,6 +54,8 @@ pub fn create_router(config: Arc<Config>, db: sqlx::SqlitePool) -> Router {
         .route("/api/emails/{id}/read", put(mailbox::mark_read))
         .route("/api/emails/{id}/move", put(mailbox::move_email))
         .route("/api/emails/send", post(mailbox::send_email))
+        .route("/api/emails/mailboxes", get(mailbox::get_mailbox_counts))
+        .route("/api/attachments/{id}", get(mailbox::download_attachment))
         // Domains
         .route("/api/domains", get(domain::list_domains))
         .route("/api/domains", post(domain::create_domain))
@@ -68,7 +68,11 @@ pub fn create_router(config: Arc<Config>, db: sqlx::SqlitePool) -> Router {
         // Settings
         .route("/api/settings", get(settings::get_settings))
         .route("/api/settings", put(settings::update_settings))
-        .route_layer(axum::middleware::from_fn_with_state(state.clone(), auth_middleware));
+        .route("/api/settings/password", post(settings::change_password))
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth_middleware,
+        ));
 
     // Static files with SPA fallback
     Router::new()

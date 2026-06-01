@@ -1,12 +1,12 @@
-use axum::{
-    extract::{Path, State, Extension},
-    Json,
-};
 use axum::http::StatusCode;
+use axum::{
+    Json,
+    extract::{Extension, Path, State},
+};
 use serde_json::json;
 
-use crate::db::queries;
 use crate::db::models::CreateUserRequest;
+use crate::db::queries;
 use crate::web::middleware::Claims;
 use crate::web::router::AppState;
 
@@ -49,8 +49,8 @@ pub async fn create_user(
     }
 
     // Hash password
-    let password_hash = bcrypt::hash(&payload.password, 10)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let password_hash =
+        bcrypt::hash(&payload.password, 10).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let user = queries::create_user(
         &state.db,

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::RData;
 use tracing::debug;

@@ -41,11 +41,10 @@ pub async fn check_spf(sender_domain: &str, sender_ip: &str) -> SpfResult {
         Some(record) => {
             debug!("SPF record for {}: {}", sender_domain, record);
             // Basic SPF check - a full implementation would parse all mechanisms
-            if record.contains(&format!("ip4:{}", sender_ip)) {
-                SpfResult::Pass
-            } else if record.contains("include:_spf.google.com") && is_google_ip(sender_ip) {
-                SpfResult::Pass
-            } else if record.contains("+all") {
+            if record.contains(&format!("ip4:{}", sender_ip))
+                || (record.contains("include:_spf.google.com") && is_google_ip(sender_ip))
+                || record.contains("+all")
+            {
                 SpfResult::Pass
             } else if record.contains("?all") {
                 SpfResult::Neutral
@@ -90,6 +89,7 @@ impl SpfResult {
 }
 
 /// Generate DKIM DNS record for a domain
+#[allow(dead_code)]
 pub fn generate_dkim_dns_record(selector: &str, domain: &str, public_key: &str) -> String {
     format!(
         "{}._domainkey.{} IN TXT \"v=DKIM1; k=rsa; p={}\"",
@@ -98,6 +98,7 @@ pub fn generate_dkim_dns_record(selector: &str, domain: &str, public_key: &str) 
 }
 
 /// Generate SPF record for a domain
+#[allow(dead_code)]
 pub fn generate_spf_record(domain: &str, extra_ips: &[String]) -> String {
     let mut parts = vec!["v=spf1".to_string()];
     parts.push(format!("mx:{} -all", domain));

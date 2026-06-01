@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// Standard mailbox names
 pub const INBOX: &str = "INBOX";
 pub const SENT: &str = "Sent";

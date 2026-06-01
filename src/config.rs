@@ -51,6 +51,7 @@ pub struct TlsConfig {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DkimConfig {
+    #[allow(dead_code)]
     pub key_size: u32,
     pub selector: String,
 }
@@ -61,13 +62,6 @@ impl Config {
             .unwrap_or_else(|_| include_str!("../config.toml").to_string());
         let config: Config = toml::from_str(&content)?;
         Ok(config)
-    }
-
-    pub fn load_or_default() -> Self {
-        Self::load("config.toml").unwrap_or_else(|e| {
-            tracing::warn!("Failed to load config.toml: {}, using defaults", e);
-            Self::default()
-        })
     }
 }
 

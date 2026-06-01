@@ -1,8 +1,9 @@
-use axum::{extract::State, Extension, Json};
 use axum::http::StatusCode;
+use axum::{Extension, Json, extract::State};
 use serde::Deserialize;
 use serde_json::json;
 
+use crate::db::models::ChangePasswordRequest;
 use crate::db::queries;
 use crate::web::middleware::Claims;
 use crate::web::router::AppState;
@@ -52,8 +53,11 @@ pub async fn run_setup(
     }
 
     // Validate inputs
-    if payload.hostname.is_empty() || payload.domain.is_empty()
-        || payload.admin_email.is_empty() || payload.admin_password.len() < 6 {
+    if payload.hostname.is_empty()
+        || payload.domain.is_empty()
+        || payload.admin_email.is_empty()
+        || payload.admin_password.len() < 6
+    {
         return Err(StatusCode::BAD_REQUEST);
     }
 
@@ -63,8 +67,8 @@ pub async fn run_setup(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Create admin user
-    let password_hash = bcrypt::hash(&payload.admin_password, 10)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let password_hash =
+        bcrypt::hash(&payload.admin_password, 10).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     let user = queries::create_user(
         &state.db,
@@ -76,7 +80,11 @@ pub async fn run_setup(
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    tracing::info!("Setup completed: admin user {} created for domain {}", user.email, payload.domain);
+    tracing::info!(
+        "Setup completed: admin user {} created for domain {}",
+        user.email,
+        payload.domain
+    );
 
     // Generate JWT token for immediate login
     let claims = crate::web::middleware::Claims {
@@ -148,4 +156,37 @@ pub async fn update_settings(
 
     // TODO: Implement settings persistence
     Ok(Json(json!({ "ok": true, "message": "Settings updated" })))
+}
+
+pub async fn change_password(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Json(payload): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if payload.new_password.len() < 6 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let user = queries::get_user_by_id(&state.db, claims.sub)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    // Verify old password
+    let valid = bcrypt::verify(&payload.old_password, &user.password_hash)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if !valid {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
+    // Hash and save new password
+    let new_hash =
+        bcrypt::hash(&payload.new_password, 10).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    queries::update_user_password(&state.db, claims.sub, &new_hash)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    Ok(Json(json!({ "ok": true, "message": "密码已修改" })))
 }

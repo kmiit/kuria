@@ -1,8 +1,8 @@
 pub mod models;
 pub mod queries;
 
-use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
+use sqlx::sqlite::SqlitePoolOptions;
 
 pub async fn init_pool(database_url: &str) -> anyhow::Result<SqlitePool> {
     let pool = SqlitePoolOptions::new()

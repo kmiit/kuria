@@ -8,8 +8,8 @@ mod smtp;
 mod tls;
 mod web;
 
-use std::sync::{Arc, Mutex};
 use clap::Parser;
+use std::sync::{Arc, Mutex};
 use tracing_subscriber::EnvFilter;
 
 use config::Config;
@@ -56,7 +56,11 @@ fn start_vite_dev_server() {
         ("npm", vec!["run", "dev"])
     };
 
-    tracing::info!("Starting Vite dev server ({} {}) ...", program, args.join(" "));
+    tracing::info!(
+        "Starting Vite dev server ({} {}) ...",
+        program,
+        args.join(" ")
+    );
 
     match Command::new(program)
         .args(&args)
@@ -68,7 +72,10 @@ fn start_vite_dev_server() {
             tracing::info!("Vite dev server started — frontend at http://localhost:3000");
         }
         Err(e) => {
-            tracing::error!("Failed to start Vite dev server: {}. Run `cd frontend && npm install` first.", e);
+            tracing::error!(
+                "Failed to start Vite dev server: {}. Run `cd frontend && npm install` first.",
+                e
+            );
         }
     }
 }
@@ -99,11 +106,18 @@ async fn main() -> anyhow::Result<()> {
 
     // Handle init mode
     if cli.init {
-        let email = cli.admin_email.ok_or_else(|| anyhow::anyhow!("--admin-email required with --init"))?;
-        let password = cli.admin_password.ok_or_else(|| anyhow::anyhow!("--admin-password required with --init"))?;
+        let email = cli
+            .admin_email
+            .ok_or_else(|| anyhow::anyhow!("--admin-email required with --init"))?;
+        let password = cli
+            .admin_password
+            .ok_or_else(|| anyhow::anyhow!("--admin-password required with --init"))?;
 
         // Create domain from email
-        let domain_name = email.split('@').last().ok_or_else(|| anyhow::anyhow!("Invalid email"))?;
+        let domain_name = email
+            .split('@')
+            .next_back()
+            .ok_or_else(|| anyhow::anyhow!("Invalid email"))?;
         let domain = match db::queries::get_domain_by_name(&db, domain_name).await? {
             Some(d) => d,
             None => db::queries::create_domain(&db, domain_name).await?,
@@ -169,11 +183,11 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("Shutting down...");
 
     // Kill the Vite dev server if running
-    if let Ok(mut guard) = VITE_CHILD.lock() {
-        if let Some(ref mut child) = *guard {
-            let _ = child.kill();
-            let _ = child.wait();
-        }
+    if let Ok(mut guard) = VITE_CHILD.lock()
+        && let Some(ref mut child) = *guard
+    {
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     Ok(())

@@ -1,5 +1,5 @@
 pub mod auth;
-pub mod mailbox;
 pub mod domain;
-pub mod user;
+pub mod mailbox;
 pub mod settings;
+pub mod user;

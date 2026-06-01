@@ -1,6 +1,6 @@
+use rustls::pki_types::CertificateDer;
 use std::path::Path;
 use std::sync::Arc;
-use rustls::pki_types::CertificateDer;
 use tokio_rustls::TlsAcceptor;
 use tracing::info;
 
@@ -11,8 +11,8 @@ pub fn load_tls_config(
 ) -> anyhow::Result<Arc<rustls::ServerConfig>> {
     let cert_file = std::fs::File::open(cert_path)?;
     let mut cert_reader = std::io::BufReader::new(cert_file);
-    let certs: Vec<CertificateDer> = rustls_pemfile::certs(&mut cert_reader)
-        .collect::<Result<Vec<_>, _>>()?;
+    let certs: Vec<CertificateDer> =
+        rustls_pemfile::certs(&mut cert_reader).collect::<Result<Vec<_>, _>>()?;
 
     let key_file = std::fs::File::open(key_path)?;
     let mut key_reader = std::io::BufReader::new(key_file);
@@ -23,7 +23,10 @@ pub fn load_tls_config(
         .with_no_client_auth()
         .with_single_cert(certs, key)?;
 
-    info!("TLS configuration loaded from {:?} and {:?}", cert_path, key_path);
+    info!(
+        "TLS configuration loaded from {:?} and {:?}",
+        cert_path, key_path
+    );
     Ok(Arc::new(config))
 }
 

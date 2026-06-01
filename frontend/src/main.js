@@ -17,9 +17,11 @@ const router = createRouter({
       children: [
         { path: '', name: 'dashboard', component: () => import('./views/Dashboard.vue') },
         { path: 'inbox', name: 'inbox', component: () => import('./views/Inbox.vue') },
+        { path: 'email/:id', name: 'email-detail', component: () => import('./views/EmailDetail.vue') },
         { path: 'compose', name: 'compose', component: () => import('./views/Compose.vue') },
         { path: 'domains', name: 'domains', component: () => import('./views/Domains.vue') },
         { path: 'users', name: 'users', component: () => import('./views/Users.vue') },
+        { path: 'settings', name: 'settings', component: () => import('./views/Settings.vue') },
       ],
     },
   ],

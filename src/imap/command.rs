@@ -3,11 +3,12 @@ pub enum ImapCommand {
     Capability,
     Noop,
     Logout,
-    Login(String, String),      // username, password
-    List(String, String),       // reference, pattern
-    Select(String),             // mailbox name
-    Fetch(String, String),      // sequence set, items
-    Store(String, String),      // sequence set, flags
+    StartTls,
+    Login(String, String), // username, password
+    List(String, String),  // reference, pattern
+    Select(String),        // mailbox name
+    Fetch(String, String), // sequence set, items
+    Store(String, String), // sequence set, flags
     Expunge,
     Unknown(String),
 }
@@ -61,6 +62,7 @@ impl ImapCommand {
                 }
             }
             "EXPUNGE" => ImapCommand::Expunge,
+            "STARTTLS" => ImapCommand::StartTls,
             _ => ImapCommand::Unknown(cmd_str.to_string()),
         }
     }
