@@ -10,6 +10,12 @@ fn main() {
         return;
     }
 
+    // In debug mode, skip frontend build — the Vite dev server handles it at runtime
+    if profile == "debug" {
+        println!("cargo:warning=Debug mode: skipping frontend build (Vite dev server will be used)");
+        return;
+    }
+
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
     let frontend_dir = Path::new(&manifest_dir).join("frontend");
     let dist_dir = Path::new(&manifest_dir).join("static").join("dist");

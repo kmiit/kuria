@@ -8,11 +8,14 @@ mod smtp;
 mod tls;
 mod web;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
 use config::Config;
+
+/// Handle to the Vite dev server child process (debug mode only).
+static VITE_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
 
 #[derive(Parser)]
 #[command(name = "kuria")]
@@ -33,6 +36,41 @@ struct Cli {
     /// Admin password for initialization
     #[arg(long)]
     admin_password: Option<String>,
+}
+
+/// Spawn the Vite dev server (`npm run dev`) in the frontend directory.
+/// In debug mode this gives us hot-reload for the Vue frontend.
+fn start_vite_dev_server() {
+    use std::process::Command;
+
+    // Detect package manager: prefer bun if available
+    let has_bun = Command::new("bun")
+        .args(["--version"])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+
+    let (program, args) = if has_bun {
+        ("bun", vec!["run", "dev"])
+    } else {
+        ("npm", vec!["run", "dev"])
+    };
+
+    tracing::info!("Starting Vite dev server ({} {}) ...", program, args.join(" "));
+
+    match Command::new(program)
+        .args(&args)
+        .current_dir("frontend")
+        .spawn()
+    {
+        Ok(child) => {
+            *VITE_CHILD.lock().unwrap() = Some(child);
+            tracing::info!("Vite dev server started — frontend at http://localhost:3000");
+        }
+        Err(e) => {
+            tracing::error!("Failed to start Vite dev server: {}. Run `cd frontend && npm install` first.", e);
+        }
+    }
 }
 
 #[tokio::main]
@@ -78,6 +116,11 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    // In debug mode, start the Vite dev server for frontend hot-reload
+    if cfg!(debug_assertions) {
+        start_vite_dev_server();
+    }
+
     // Start services
 
     // SMTP Server
@@ -115,10 +158,21 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("  SMTP: {}", config.smtp.listen_addr);
     tracing::info!("  IMAP: {}", config.imap.listen_addr);
     tracing::info!("  Web:  http://{}", config.web.listen_addr);
+    if cfg!(debug_assertions) {
+        tracing::info!("  Frontend (HMR): http://localhost:3000");
+    }
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down...");
+
+    // Kill the Vite dev server if running
+    if let Ok(mut guard) = VITE_CHILD.lock() {
+        if let Some(ref mut child) = *guard {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 
     Ok(())
 }
