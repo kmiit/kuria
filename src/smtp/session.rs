@@ -281,19 +281,16 @@ where
             capabilities.push_str("250-SIZE 52428800\r\n");
             capabilities.push_str("250-8BITMIME\r\n");
             capabilities.push_str("250-AUTH LOGIN PLAIN\r\n");
-            let starttls_available = !_is_tls
-                && config.smtp.enable_starttls
-                && config.tls.cert_path.exists()
-                && config.tls.key_path.exists();
+            let starttls_available =
+                !_is_tls && config.smtp.enable_starttls && config.tls.internal_tls_enabled();
             if starttls_available {
                 capabilities.push_str("250-STARTTLS\r\n");
             }
             capabilities.push_str("250 HELP\r\n");
             writer.write_all(capabilities.as_bytes()).await?;
         } else if upper == "STARTTLS" {
-            let starttls_available = config.smtp.enable_starttls
-                && config.tls.cert_path.exists()
-                && config.tls.key_path.exists();
+            let starttls_available =
+                config.smtp.enable_starttls && config.tls.internal_tls_enabled();
             if _is_tls {
                 let resp = "503 TLS already active\r\n";
                 writer.write_all(resp.as_bytes()).await?;

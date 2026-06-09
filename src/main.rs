@@ -15,6 +15,7 @@ use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use config::Config;
+use tls::config::InternalTlsStatus;
 
 /// Handle to the Vite dev server child process (debug mode only).
 static VITE_CHILD: Mutex<Option<std::process::Child>> = Mutex::new(None);
@@ -88,6 +89,7 @@ struct BoundListeners {
     imap: TcpListener,
     imaps: Option<TcpListener>,
     web: TcpListener,
+    internal_tls: InternalTlsStatus,
 }
 
 fn listener_disabled(addr: &str) -> bool {
@@ -122,18 +124,27 @@ async fn bind_endpoint(label: &str, addr: &str, errors: &mut Vec<String>) -> Opt
 }
 
 async fn bind_service_listeners(config: &Config) -> anyhow::Result<BoundListeners> {
-    let tls_available = config.tls.cert_path.exists() && config.tls.key_path.exists();
+    let internal_tls = tls::config::internal_tls_status(&config.tls);
+    if matches!(internal_tls, InternalTlsStatus::MissingCertificates) {
+        anyhow::bail!(
+            "TLS mode is internal but certificates were not found at {:?} / {:?}",
+            config.tls.cert_path,
+            config.tls.key_path
+        );
+    }
+
+    let internal_tls_enabled = internal_tls.is_enabled();
     let mut errors = Vec::new();
 
     let smtp = bind_endpoint("SMTP", &config.smtp.listen_addr, &mut errors).await;
-    let smtps = if !listener_disabled(&config.smtp.listen_addr_tls) && tls_available {
+    let smtps = if !listener_disabled(&config.smtp.listen_addr_tls) && internal_tls_enabled {
         bind_endpoint("SMTPS", &config.smtp.listen_addr_tls, &mut errors).await
     } else {
         None
     };
 
     let imap = bind_endpoint("IMAP", &config.imap.listen_addr, &mut errors).await;
-    let imaps = if !listener_disabled(&config.imap.listen_addr_tls) && tls_available {
+    let imaps = if !listener_disabled(&config.imap.listen_addr_tls) && internal_tls_enabled {
         bind_endpoint("IMAPS", &config.imap.listen_addr_tls, &mut errors).await
     } else {
         None
@@ -154,7 +165,25 @@ async fn bind_service_listeners(config: &Config) -> anyhow::Result<BoundListener
         imap: imap.expect("IMAP listener must be bound when no errors were reported"),
         imaps,
         web: web.expect("Web listener must be bound when no errors were reported"),
+        internal_tls,
     })
+}
+
+fn tls_listener_summary(addr: &str, listener_enabled: bool, status: InternalTlsStatus) -> String {
+    if listener_disabled(addr) {
+        return "disabled by listen_addr port 0".to_string();
+    }
+
+    match status {
+        InternalTlsStatus::Enabled if listener_enabled => addr.to_string(),
+        InternalTlsStatus::Enabled => "disabled".to_string(),
+        InternalTlsStatus::External => "disabled; TLS is handled by external proxy".to_string(),
+        InternalTlsStatus::Off => "disabled by tls.mode".to_string(),
+        InternalTlsStatus::AutoMissingCertificates => {
+            "disabled; certificates not found in auto mode".to_string()
+        }
+        InternalTlsStatus::MissingCertificates => "disabled; certificates not found".to_string(),
+    }
 }
 
 #[tokio::main]
@@ -225,6 +254,7 @@ async fn main() -> anyhow::Result<()> {
     let smtp_db = db.clone();
     let smtp_plugins = plugin_manager.clone();
     let smtp_listener = listeners.smtp;
+    let smtps_enabled = listeners.smtps.is_some();
     let smtps_listener = listeners.smtps;
     tokio::spawn(async move {
         let server = smtp::server::SmtpServer::new(smtp_config, smtp_db, smtp_plugins);
@@ -240,6 +270,7 @@ async fn main() -> anyhow::Result<()> {
     let imap_config = config.clone();
     let imap_db = db.clone();
     let imap_listener = listeners.imap;
+    let imaps_enabled = listeners.imaps.is_some();
     let imaps_listener = listeners.imaps;
     tokio::spawn(async move {
         let server = imap::server::ImapServer::new(imap_config, imap_db);
@@ -267,7 +298,23 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!("Kuria Mail Server started successfully");
     tracing::info!("  SMTP: {}", config.smtp.listen_addr);
+    tracing::info!(
+        "  SMTPS: {}",
+        tls_listener_summary(
+            &config.smtp.listen_addr_tls,
+            smtps_enabled,
+            listeners.internal_tls
+        )
+    );
     tracing::info!("  IMAP: {}", config.imap.listen_addr);
+    tracing::info!(
+        "  IMAPS: {}",
+        tls_listener_summary(
+            &config.imap.listen_addr_tls,
+            imaps_enabled,
+            listeners.internal_tls
+        )
+    );
     tracing::info!("  Web:  http://{}", config.web.listen_addr);
     if cfg!(debug_assertions) && is_cargo_run {
         tracing::info!("  Frontend (HMR): http://localhost:3000");

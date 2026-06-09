@@ -25,14 +25,11 @@ impl ImapServer {
         let config = self.config.clone();
         let db = self.db.clone();
 
-        if self.config.imap.listen_addr_tls != "0.0.0.0:0" && tls_listener.is_none() {
-            let tls_available = config.tls.cert_path.exists() && config.tls.key_path.exists();
-            if !tls_available {
-                warn!(
-                    "IMAPS disabled: TLS certificates not found at {:?} / {:?}",
-                    config.tls.cert_path, config.tls.key_path
-                );
-            }
+        if !crate::listener_disabled(&self.config.imap.listen_addr_tls) && tls_listener.is_none() {
+            warn!(
+                "IMAPS disabled: {}",
+                crate::tls::config::internal_tls_unavailable_message(&config.tls)
+            );
         }
 
         if tls_listener.is_some() {
@@ -71,10 +68,7 @@ impl ImapServer {
             let config2 = config.clone();
             let db2 = db.clone();
             tokio::spawn(async move {
-                let tls_config = match crate::tls::config::load_tls_config(
-                    &config2.tls.cert_path,
-                    &config2.tls.key_path,
-                ) {
+                let tls_config = match crate::tls::config::load_internal_tls_config(&config2.tls) {
                     Ok(c) => c,
                     Err(e) => {
                         error!("Failed to load TLS config for IMAPS: {}", e);

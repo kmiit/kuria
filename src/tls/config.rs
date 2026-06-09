@@ -4,6 +4,52 @@ use std::sync::Arc;
 use tokio_rustls::TlsAcceptor;
 use tracing::info;
 
+use crate::config::TlsConfig;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InternalTlsStatus {
+    Enabled,
+    External,
+    Off,
+    AutoMissingCertificates,
+    MissingCertificates,
+}
+
+impl InternalTlsStatus {
+    pub fn is_enabled(self) -> bool {
+        matches!(self, Self::Enabled)
+    }
+}
+
+pub fn internal_tls_status(config: &TlsConfig) -> InternalTlsStatus {
+    match config.mode {
+        crate::config::TlsMode::Internal if config.certificates_present() => {
+            InternalTlsStatus::Enabled
+        }
+        crate::config::TlsMode::Internal => InternalTlsStatus::MissingCertificates,
+        crate::config::TlsMode::Auto if config.certificates_present() => InternalTlsStatus::Enabled,
+        crate::config::TlsMode::Auto => InternalTlsStatus::AutoMissingCertificates,
+        crate::config::TlsMode::External => InternalTlsStatus::External,
+        crate::config::TlsMode::Off => InternalTlsStatus::Off,
+    }
+}
+
+pub fn internal_tls_unavailable_message(config: &TlsConfig) -> String {
+    match internal_tls_status(config) {
+        InternalTlsStatus::Enabled => "internal TLS is enabled".to_string(),
+        InternalTlsStatus::External => {
+            "TLS mode is external; terminate TLS in Nginx or another proxy".to_string()
+        }
+        InternalTlsStatus::Off => "TLS mode is off".to_string(),
+        InternalTlsStatus::AutoMissingCertificates | InternalTlsStatus::MissingCertificates => {
+            format!(
+                "TLS certificates not found at {:?} / {:?}",
+                config.cert_path, config.key_path
+            )
+        }
+    }
+}
+
 /// Load TLS configuration from certificate and key files
 pub fn load_tls_config(
     cert_path: &Path,
@@ -28,6 +74,14 @@ pub fn load_tls_config(
         cert_path, key_path
     );
     Ok(Arc::new(config))
+}
+
+pub fn load_internal_tls_config(config: &TlsConfig) -> anyhow::Result<Arc<rustls::ServerConfig>> {
+    if !internal_tls_status(config).is_enabled() {
+        anyhow::bail!("{}", internal_tls_unavailable_message(config));
+    }
+
+    load_tls_config(&config.cert_path, &config.key_path)
 }
 
 /// Create a TLS acceptor

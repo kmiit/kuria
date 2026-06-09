@@ -59,10 +59,8 @@ where
     W: AsyncWrite + Unpin,
 {
     // Check if TLS is available
-    let starttls_available = !_is_tls
-        && config.imap.enable_starttls
-        && config.tls.cert_path.exists()
-        && config.tls.key_path.exists();
+    let starttls_available =
+        !_is_tls && config.imap.enable_starttls && config.tls.internal_tls_enabled();
 
     // Send greeting
     let greeting = if _is_tls {

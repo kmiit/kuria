@@ -27,12 +27,21 @@ enable_starttls = true
 listen_addr = "0.0.0.0:8080"
 # JWT 密钥 (请在生产环境中更改)
 jwt_secret = "change-me-in-production"
+# Trust X-Forwarded-* headers from Nginx or another reverse proxy.
+# Keep this false if Kuria is directly exposed to the internet.
+trust_proxy_headers = false
 
 [database]
 # SQLite 数据库文件路径
 url = "sqlite:./data/kuria.db?mode=rwc"
 
 [tls]
+# TLS mode:
+# - auto: use Kuria-managed/internal TLS only when cert_path and key_path exist
+# - internal: require cert_path/key_path and enable SMTPS/IMAPS/STARTTLS
+# - external: TLS is terminated by Nginx or another proxy; Kuria will not load certificates
+# - off: disable Kuria-managed/internal TLS
+mode = "auto"
 # TLS 证书文件路径
 cert_path = "./data/certs/cert.pem"
 # TLS 私钥文件路径

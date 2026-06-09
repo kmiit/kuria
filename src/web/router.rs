@@ -123,7 +123,7 @@ async fn plugin_middleware(
     let query = request.uri().query().unwrap_or("").to_string();
 
     // Collect headers into a JSON object
-    let headers_map: serde_json::Map<String, serde_json::Value> = request
+    let mut headers_map: serde_json::Map<String, serde_json::Value> = request
         .headers()
         .iter()
         .filter_map(|(k, v)| {
@@ -132,6 +132,9 @@ async fn plugin_middleware(
                 .map(|v| (k.to_string(), serde_json::Value::String(v.to_string())))
         })
         .collect();
+    if state.config.web.trust_proxy_headers {
+        add_trusted_proxy_headers(request.headers(), &mut headers_map);
+    }
     let headers_json = serde_json::to_string(&headers_map).unwrap_or_default();
 
     if let Some(result) = state
@@ -148,4 +151,49 @@ async fn plugin_middleware(
     }
 
     Ok(next.run(request).await)
+}
+
+fn first_header_value<'a>(headers: &'a axum::http::HeaderMap, name: &str) -> Option<&'a str> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+}
+
+fn add_proxy_header(
+    headers_map: &mut serde_json::Map<String, serde_json::Value>,
+    name: &str,
+    value: Option<&str>,
+) {
+    if let Some(value) = value {
+        headers_map.insert(
+            name.to_string(),
+            serde_json::Value::String(value.to_string()),
+        );
+    }
+}
+
+fn add_trusted_proxy_headers(
+    headers: &axum::http::HeaderMap,
+    headers_map: &mut serde_json::Map<String, serde_json::Value>,
+) {
+    add_proxy_header(
+        headers_map,
+        "x-kuria-client-ip",
+        first_header_value(headers, "x-forwarded-for")
+            .or_else(|| first_header_value(headers, "x-real-ip")),
+    );
+    add_proxy_header(
+        headers_map,
+        "x-kuria-forwarded-proto",
+        first_header_value(headers, "x-forwarded-proto"),
+    );
+    add_proxy_header(
+        headers_map,
+        "x-kuria-forwarded-host",
+        first_header_value(headers, "x-forwarded-host")
+            .or_else(|| first_header_value(headers, "host")),
+    );
 }

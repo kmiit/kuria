@@ -37,6 +37,8 @@ pub struct ImapConfig {
 pub struct WebConfig {
     pub listen_addr: String,
     pub jwt_secret: String,
+    #[serde(default)]
+    pub trust_proxy_headers: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -46,8 +48,38 @@ pub struct DatabaseConfig {
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TlsConfig {
+    #[serde(default)]
+    pub mode: TlsMode,
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TlsMode {
+    Auto,
+    Internal,
+    External,
+    Off,
+}
+
+impl Default for TlsMode {
+    fn default() -> Self {
+        Self::Auto
+    }
+}
+
+impl TlsConfig {
+    pub fn certificates_present(&self) -> bool {
+        self.cert_path.is_file() && self.key_path.is_file()
+    }
+
+    pub fn internal_tls_enabled(&self) -> bool {
+        match self.mode {
+            TlsMode::Auto | TlsMode::Internal => self.certificates_present(),
+            TlsMode::External | TlsMode::Off => false,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -93,11 +125,13 @@ impl Default for Config {
             web: WebConfig {
                 listen_addr: "0.0.0.0:8080".to_string(),
                 jwt_secret: "change-me-in-production".to_string(),
+                trust_proxy_headers: false,
             },
             database: DatabaseConfig {
                 url: "sqlite:./data/kuria.db".to_string(),
             },
             tls: TlsConfig {
+                mode: TlsMode::Auto,
                 cert_path: PathBuf::from("./data/certs/cert.pem"),
                 key_path: PathBuf::from("./data/certs/key.pem"),
             },
