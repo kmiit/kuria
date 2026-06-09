@@ -1,77 +1,116 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
-import { MiuixButton, MiuixInput, MiuixCard } from 'miuix-vue'
+import { computed, onMounted, ref } from 'vue'
+import { MiuixButton, MiuixCard, MiuixInput } from 'miuix-vue'
 import { api } from '../api'
 
 const settings = ref(null)
 const plugins = ref(null)
 const loading = ref(true)
+const savingSettings = ref(false)
 const error = ref('')
+const result = ref('')
 const pluginsError = ref('')
 
+const hostnameDraft = ref('')
 const oldPassword = ref('')
 const newPassword = ref('')
 const confirmPassword = ref('')
 const changingPassword = ref(false)
-const passwordResult = ref('')
+
+const domainPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/
 
 const passwordStrength = computed(() => {
   const value = newPassword.value
   let score = 0
-  if (value.length >= 8) score++
-  if (/[A-Z]/.test(value) && /[a-z]/.test(value)) score++
-  if (/\d/.test(value)) score++
-  if (/[^A-Za-z0-9]/.test(value)) score++
+  if (value.length >= 8) score += 1
+  if (/[A-Z]/.test(value) && /[a-z]/.test(value)) score += 1
+  if (/\d/.test(value)) score += 1
+  if (/[^A-Za-z0-9]/.test(value)) score += 1
   if (!value) return { label: '未填写', className: '' }
-  if (score <= 1) return { label: '较弱', className: 'weak' }
-  if (score <= 3) return { label: '中等', className: 'medium' }
+  if (score <= 1) return { label: '偏弱', className: 'weak' }
+  if (score <= 3) return { label: '可用', className: 'medium' }
   return { label: '较强', className: 'strong' }
 })
 
 async function loadSettings() {
   loading.value = true
   error.value = ''
+  result.value = ''
   pluginsError.value = ''
   try {
     const settingsData = await api.getSettings()
     settings.value = settingsData
+    hostnameDraft.value = settingsData.hostname || ''
     plugins.value = settingsData.plugins || null
     if (!settingsData.plugins) {
-      pluginsError.value = '当前后端未返回插件状态，请重启后端以启用插件管理。'
+      pluginsError.value = '后端没有返回插件状态，请重启后端后再试。'
     }
-  } catch (e) {
-    error.value = e.message || '加载设置失败'
+  } catch (err) {
+    error.value = err.message || '加载设置失败'
     plugins.value = null
   } finally {
     loading.value = false
   }
 }
 
+function normalizeDomain(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/.*$/, '')
+    .replace(/\.$/, '')
+}
+
+async function saveServerSettings() {
+  const hostname = normalizeDomain(hostnameDraft.value)
+  result.value = ''
+  error.value = ''
+
+  if (!domainPattern.test(hostname)) {
+    error.value = '主机名格式不正确，例如 mail.example.com'
+    return
+  }
+
+  savingSettings.value = true
+  try {
+    const data = await api.updateSettings({ hostname })
+    settings.value = { ...settings.value, hostname: data.hostname || hostname }
+    hostnameDraft.value = settings.value.hostname
+    result.value = '服务器设置已保存'
+  } catch (err) {
+    error.value = err.message || '保存设置失败'
+  } finally {
+    savingSettings.value = false
+  }
+}
+
 async function handleChangePassword() {
-  passwordResult.value = ''
+  result.value = ''
+  error.value = ''
 
   if (!oldPassword.value || !newPassword.value || !confirmPassword.value) {
-    passwordResult.value = '请填写所有字段'
+    error.value = '请填写所有密码字段'
     return
   }
   if (newPassword.value.length < 6) {
-    passwordResult.value = '新密码至少需要 6 个字符'
+    error.value = '新密码至少需要 6 个字符'
     return
   }
   if (newPassword.value !== confirmPassword.value) {
-    passwordResult.value = '两次输入的密码不一致'
+    error.value = '两次输入的新密码不一致'
     return
   }
 
   changingPassword.value = true
   try {
     await api.changePassword(oldPassword.value, newPassword.value)
-    passwordResult.value = '密码已修改成功'
+    result.value = '密码已修改'
     oldPassword.value = ''
     newPassword.value = ''
     confirmPassword.value = ''
-  } catch (e) {
-    passwordResult.value = '修改失败：请检查旧密码是否正确'
+  } catch {
+    error.value = '修改失败，请检查当前密码是否正确'
   } finally {
     changingPassword.value = false
   }
@@ -79,7 +118,7 @@ async function handleChangePassword() {
 
 function copyValue(value) {
   navigator.clipboard.writeText(String(value || '')).then(() => {
-    passwordResult.value = '已复制到剪贴板'
+    result.value = '已复制到剪贴板'
   })
 }
 
@@ -91,22 +130,45 @@ onMounted(loadSettings)
     <div class="page-header">
       <div>
         <h1>设置</h1>
-        <p class="subtitle">查看服务配置，维护当前账号密码。</p>
+        <p class="subtitle">维护服务器标识、查看运行配置，并管理当前账号密码。</p>
       </div>
       <MiuixButton @click="loadSettings">刷新</MiuixButton>
     </div>
 
     <div v-if="error" class="notice error">{{ error }}</div>
-    <div v-if="loading" class="loading">加载中...</div>
+    <div v-if="result" class="notice success">{{ result }}</div>
+    <div v-if="loading" class="loading">正在加载设置...</div>
 
     <template v-else>
       <div class="settings-stack">
         <MiuixCard v-if="settings">
           <div class="card-inner">
-            <h2 class="section-title">服务器信息</h2>
+            <h2 class="section-title">服务器设置</h2>
+            <div class="server-form">
+              <label class="form-group">
+                <span>主机名</span>
+                <div class="input-action-row">
+                  <MiuixInput
+                    v-model="hostnameDraft"
+                    placeholder="mail.example.com"
+                    @keyup.enter="saveServerSettings"
+                  />
+                  <MiuixButton
+                    type="primary"
+                    class="save-hostname-button"
+                    :disabled="savingSettings"
+                    @click="saveServerSettings"
+                  >
+                    {{ savingSettings ? '保存中...' : '保存主机名' }}
+                  </MiuixButton>
+                </div>
+                <small>用于 SMTP 问候语、邮件 Message-ID 和本地域名判断。修改后新请求立即生效。</small>
+              </label>
+            </div>
+
             <div class="info-grid">
               <button class="info-item" type="button" @click="copyValue(settings.hostname)">
-                <span class="info-label">主机名</span>
+                <span class="info-label">当前主机名</span>
                 <span class="info-value">{{ settings.hostname }}</span>
               </button>
               <button class="info-item" type="button" @click="copyValue(settings.smtp_port)">
@@ -191,42 +253,26 @@ onMounted(loadSettings)
           <div class="card-inner">
             <h2 class="section-title">修改密码</h2>
             <div class="password-form">
-              <div class="form-group">
-                <label>当前密码</label>
-                <MiuixInput
-                  v-model="oldPassword"
-                  type="password"
-                  placeholder="输入当前密码"
-                />
-              </div>
-              <div class="form-group">
-                <label>新密码</label>
-                <MiuixInput
-                  v-model="newPassword"
-                  type="password"
-                  placeholder="至少 6 个字符"
-                />
-                <div class="strength" :class="passwordStrength.className">
+              <label class="form-group">
+                <span>当前密码</span>
+                <MiuixInput v-model="oldPassword" type="password" placeholder="输入当前密码" />
+              </label>
+              <label class="form-group">
+                <span>新密码</span>
+                <MiuixInput v-model="newPassword" type="password" placeholder="至少 6 个字符" />
+                <small class="strength" :class="passwordStrength.className">
                   强度：{{ passwordStrength.label }}
-                </div>
-              </div>
-              <div class="form-group">
-                <label>确认新密码</label>
+                </small>
+              </label>
+              <label class="form-group">
+                <span>确认新密码</span>
                 <MiuixInput
                   v-model="confirmPassword"
                   type="password"
                   placeholder="再次输入新密码"
                   @keyup.enter="handleChangePassword"
                 />
-              </div>
-
-              <p
-                v-if="passwordResult"
-                class="result"
-                :class="{ success: passwordResult.includes('成功') || passwordResult.includes('复制') }"
-              >
-                {{ passwordResult }}
-              </p>
+              </label>
 
               <MiuixButton
                 type="primary"
@@ -289,6 +335,11 @@ onMounted(loadSettings)
   border: 1px solid color-mix(in srgb, var(--app-danger) 32%, transparent);
 }
 
+.notice.success {
+  color: var(--app-success);
+  border: 1px solid color-mix(in srgb, var(--app-success) 32%, transparent);
+}
+
 .settings-stack {
   display: flex;
   flex-direction: column;
@@ -304,6 +355,40 @@ onMounted(loadSettings)
   font-weight: 700;
   color: var(--m-color-text);
   margin-bottom: 18px;
+}
+
+.server-form {
+  margin-bottom: 18px;
+}
+
+.input-action-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.save-hostname-button {
+  min-width: 108px;
+  min-height: 40px;
+  align-self: center;
+}
+
+.form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+
+.form-group span {
+  font-size: 14px;
+  font-weight: 650;
+  color: var(--m-color-text);
+}
+
+.form-group small {
+  color: var(--m-color-text-secondary);
+  font-size: 12px;
 }
 
 .section-row {
@@ -507,18 +592,6 @@ onMounted(loadSettings)
   max-width: 430px;
 }
 
-.form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-}
-
-.form-group label {
-  font-size: 14px;
-  font-weight: 650;
-  color: var(--m-color-text);
-}
-
 .strength {
   font-size: 12px;
   color: var(--m-color-text-secondary);
@@ -536,15 +609,6 @@ onMounted(loadSettings)
   color: var(--app-success);
 }
 
-.result {
-  font-size: 14px;
-  color: var(--app-danger);
-}
-
-.result.success {
-  color: var(--app-success);
-}
-
 .about-card p {
   color: var(--m-color-text);
   font-size: 14px;
@@ -557,8 +621,10 @@ onMounted(loadSettings)
 }
 
 @media (max-width: 620px) {
-  .page-header {
+  .page-header,
+  .input-action-row {
     align-items: stretch;
+    grid-template-columns: 1fr;
     flex-direction: column;
   }
 

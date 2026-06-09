@@ -51,6 +51,15 @@ export const api = {
       body: JSON.stringify({ email, password }),
     }),
 
+  // Setup
+  getSetupStatus: () => request('/api/setup/status', { authRedirect: false }),
+  runSetup: (data) =>
+    request('/api/setup', {
+      method: 'POST',
+      authRedirect: false,
+      body: JSON.stringify(data),
+    }),
+
   // Emails
   getEmails: (mailbox = 'INBOX', page = 1, perPage = 50) =>
     request(withQuery('/api/emails', { mailbox, page, per_page: perPage })),
@@ -95,6 +104,11 @@ export const api = {
 
   // Settings
   getSettings: () => request('/api/settings'),
+  updateSettings: (data) =>
+    request('/api/settings', {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
   changePassword: (old_password, new_password) =>
     request('/api/settings/password', {
       method: 'POST',

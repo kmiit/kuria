@@ -15,7 +15,7 @@ pub struct MailDelivery {
 
 impl MailDelivery {
     pub fn new(config: Arc<Config>, db: sqlx::SqlitePool) -> Self {
-        let sender = MailSender::new(config.clone());
+        let sender = MailSender::new(config.clone(), db.clone());
         Self { config, db, sender }
     }
 
@@ -28,7 +28,7 @@ impl MailDelivery {
         envelope_recipients: &[String],
     ) -> anyhow::Result<()> {
         let parsed = parser::parse_email(raw_data)?;
-        let hostname = &self.config.server.hostname;
+        let hostname = crate::config::effective_hostname(&self.config, &self.db).await;
 
         for rcpt in envelope_recipients {
             // Check if this is a local recipient

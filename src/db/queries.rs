@@ -2,19 +2,56 @@ use sqlx::SqlitePool;
 
 use super::models::*;
 
+// System settings
+pub async fn get_system_setting(pool: &SqlitePool, key: &str) -> anyhow::Result<Option<String>> {
+    let value = sqlx::query_scalar::<_, String>("SELECT value FROM system_settings WHERE key = ?")
+        .bind(key)
+        .fetch_optional(pool)
+        .await?;
+    Ok(value)
+}
+
+pub async fn set_system_setting(pool: &SqlitePool, key: &str, value: &str) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        INSERT INTO system_settings (key, value, updated_at)
+        VALUES (?, ?, CURRENT_TIMESTAMP)
+        ON CONFLICT(key) DO UPDATE SET
+            value = excluded.value,
+            updated_at = CURRENT_TIMESTAMP
+        "#,
+    )
+    .bind(key)
+    .bind(value)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 // Domain queries
 pub async fn create_domain(pool: &SqlitePool, domain_name: &str) -> anyhow::Result<Domain> {
-    let domain =
-        sqlx::query_as::<_, Domain>("INSERT INTO domains (domain_name) VALUES (?) RETURNING *")
-            .bind(domain_name)
-            .fetch_one(pool)
-            .await?;
+    let spf_record = crate::mail::auth::generate_spf_record(domain_name, &[]);
+    let domain = sqlx::query_as::<_, Domain>(
+        "INSERT INTO domains (domain_name, spf_record) VALUES (?, ?) RETURNING *",
+    )
+    .bind(domain_name)
+    .bind(spf_record)
+    .fetch_one(pool)
+    .await?;
     Ok(domain)
 }
 
 pub async fn get_domain_by_name(pool: &SqlitePool, name: &str) -> anyhow::Result<Option<Domain>> {
     let domain = sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE domain_name = ?")
         .bind(name)
+        .fetch_optional(pool)
+        .await?;
+    Ok(domain)
+}
+
+pub async fn get_domain_by_id(pool: &SqlitePool, domain_id: i64) -> anyhow::Result<Option<Domain>> {
+    let domain = sqlx::query_as::<_, Domain>("SELECT * FROM domains WHERE id = ?")
+        .bind(domain_id)
         .fetch_optional(pool)
         .await?;
     Ok(domain)
@@ -33,6 +70,30 @@ pub async fn delete_domain(pool: &SqlitePool, domain_id: i64) -> anyhow::Result<
         .execute(pool)
         .await?;
     Ok(())
+}
+
+pub async fn update_domain_dkim(
+    pool: &SqlitePool,
+    domain_id: i64,
+    selector: &str,
+    private_key: &str,
+    public_key: &str,
+) -> anyhow::Result<Domain> {
+    let domain = sqlx::query_as::<_, Domain>(
+        r#"
+        UPDATE domains
+        SET dkim_selector = ?, dkim_private_key = ?, dkim_public_key = ?
+        WHERE id = ?
+        RETURNING *
+        "#,
+    )
+    .bind(selector)
+    .bind(private_key)
+    .bind(public_key)
+    .bind(domain_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(domain)
 }
 
 // User queries

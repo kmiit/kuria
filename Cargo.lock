@@ -1683,6 +1683,8 @@ dependencies = [
  "mail-builder",
  "mail-parser",
  "rand 0.10.1",
+ "rand_core 0.6.4",
+ "rsa",
  "rustls",
  "rustls-pemfile",
  "serde",

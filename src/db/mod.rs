@@ -31,6 +31,16 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 
     sqlx::query(
         r#"
+        UPDATE domains
+        SET spf_record = 'v=spf1 mx:' || domain_name || ' -all'
+        WHERE spf_record IS NULL OR spf_record = '';
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
         CREATE TABLE IF NOT EXISTS users (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             email TEXT NOT NULL UNIQUE,
@@ -81,6 +91,18 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
             data BLOB,
             size INTEGER,
             FOREIGN KEY (email_id) REFERENCES emails(id)
+        );
+        "#,
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        r#"
+        CREATE TABLE IF NOT EXISTS system_settings (
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL,
+            updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
         );
         "#,
     )

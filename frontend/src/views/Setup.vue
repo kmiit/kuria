@@ -1,572 +1,784 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { MiuixButton, MiuixInput, MiuixCard } from 'miuix-vue'
+import { MiuixButton, MiuixCard, MiuixInput } from 'miuix-vue'
+import { api } from '../api'
+import { setInitialized } from '../setupState'
 
 const router = useRouter()
 
+const steps = [
+  { title: '基础信息', caption: '确认邮件域名和主机名' },
+  { title: '管理员', caption: '创建第一个邮箱账号' },
+  { title: '确认', caption: '检查配置并初始化' },
+  { title: '完成', caption: '保存 DNS 记录' },
+]
+
 const step = ref(1)
-const totalSteps = 4
 const loading = ref(false)
 const error = ref('')
-const copyMessage = ref('')
-
-// Form data
-const hostname = ref('')
-const domain = ref('')
-const adminEmail = ref('')
-const adminPassword = ref('')
-const confirmPassword = ref('')
-
-// Setup result
+const copiedKey = ref('')
 const setupResult = ref(null)
 
-const progress = computed(() => (step.value / totalSteps) * 100)
+const form = ref({
+  hostname: '',
+  domain: '',
+  adminEmail: '',
+  adminPassword: '',
+  confirmPassword: '',
+})
+
+const progress = computed(() => ((step.value - 1) / (steps.length - 1)) * 100)
+const domainPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/
+const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
+
+const passwordStrength = computed(() => {
+  const value = form.value.adminPassword
+  let score = 0
+  if (value.length >= 8) score += 1
+  if (/[a-z]/.test(value) && /[A-Z]/.test(value)) score += 1
+  if (/\d/.test(value)) score += 1
+  if (/[^A-Za-z0-9]/.test(value)) score += 1
+
+  if (!value) return { label: '未填写', className: '' }
+  if (score <= 1) return { label: '偏弱', className: 'weak' }
+  if (score <= 3) return { label: '可用', className: 'medium' }
+  return { label: '较强', className: 'strong' }
+})
+
+const dnsRows = computed(() => {
+  const records = setupResult.value?.dns_records
+  if (!records) return []
+  return [
+    { key: 'mx', label: 'MX', purpose: '接收发往该域名的邮件', value: records.mx },
+    { key: 'spf', label: 'TXT / SPF', purpose: '声明允许这台服务器发信', value: records.spf },
+    { key: 'dkim', label: 'TXT / DKIM', purpose: '预留 DKIM 公钥记录', value: records.dkim },
+    { key: 'dmarc', label: 'TXT / DMARC', purpose: '定义域名认证失败策略', value: records.dmarc },
+  ]
+})
+
+const normalizedPreview = computed(() => ({
+  hostname: normalizeDomain(form.value.hostname) || 'mail.example.com',
+  domain: normalizeDomain(form.value.domain) || 'example.com',
+  adminEmail: normalizeEmail(form.value.adminEmail) || 'admin@example.com',
+}))
+
+watch(
+  () => form.value.domain,
+  (domain) => {
+    const normalized = normalizeDomain(domain)
+    if (!form.value.adminEmail || /^admin@/.test(form.value.adminEmail)) {
+      form.value.adminEmail = normalized ? `admin@${normalized}` : ''
+    }
+  },
+)
+
+function normalizeDomain(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/.*$/, '')
+    .replace(/\.$/, '')
+}
+
+function normalizeEmail(value) {
+  return String(value || '').trim().toLowerCase()
+}
+
+function clearFeedback() {
+  error.value = ''
+  copiedKey.value = ''
+}
+
+function validateDomains() {
+  form.value.hostname = normalizeDomain(form.value.hostname)
+  form.value.domain = normalizeDomain(form.value.domain)
+
+  if (!form.value.hostname) return '请填写服务器主机名'
+  if (!form.value.domain) return '请填写邮件域名'
+  if (!domainPattern.test(form.value.hostname)) return '服务器主机名格式不正确，例如 mail.example.com'
+  if (!domainPattern.test(form.value.domain)) return '邮件域名格式不正确，例如 example.com'
+  return ''
+}
+
+function validateAdmin() {
+  form.value.adminEmail = normalizeEmail(form.value.adminEmail)
+
+  if (!emailPattern.test(form.value.adminEmail)) return '请填写有效的管理员邮箱'
+  if (!form.value.adminEmail.endsWith(`@${form.value.domain}`)) {
+    return `管理员邮箱建议使用 ${form.value.domain} 域名`
+  }
+  if (form.value.adminPassword.length < 6) return '密码至少需要 6 个字符'
+  if (form.value.adminPassword !== form.value.confirmPassword) return '两次输入的密码不一致'
+  return ''
+}
 
 function nextStep() {
-  error.value = ''
-  copyMessage.value = ''
+  clearFeedback()
 
   if (step.value === 1) {
-    // Welcome - just proceed
+    error.value = validateDomains()
+    if (error.value) return
     step.value = 2
-  } else if (step.value === 2) {
-    // Validate domain settings
-    hostname.value = hostname.value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
-    domain.value = domain.value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
-    if (!hostname.value) {
-      error.value = '请输入服务器主机名'
-      return
-    }
-    if (!domain.value) {
-      error.value = '请输入域名'
-      return
-    }
-    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(hostname.value)) {
-      error.value = '请输入有效的服务器主机名'
-      return
-    }
-    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(domain.value)) {
-      error.value = '请输入有效的邮件域名'
-      return
-    }
-    // Auto-fill email
-    if (!adminEmail.value) {
-      adminEmail.value = `admin@${domain.value}`
-    }
-    step.value = 3
-  } else if (step.value === 3) {
-    // Validate admin account
-    adminEmail.value = adminEmail.value.trim().toLowerCase()
-    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail.value)) {
-      error.value = '请输入有效的邮箱地址'
-      return
-    }
-    if (adminPassword.value.length < 6) {
-      error.value = '密码至少需要 6 个字符'
-      return
-    }
-    if (adminPassword.value !== confirmPassword.value) {
-      error.value = '两次输入的密码不一致'
-      return
-    }
-    runSetup()
-  } else if (step.value === 4) {
-    // Complete - go to dashboard
-    router.push('/')
+    return
   }
+
+  if (step.value === 2) {
+    error.value = validateAdmin()
+    if (error.value) return
+    step.value = 3
+    return
+  }
+
+  if (step.value === 3) {
+    runSetup()
+    return
+  }
+
+  router.replace({ name: 'dashboard' })
 }
 
 function prevStep() {
-  if (step.value > 1) {
-    error.value = ''
-    step.value--
-  }
+  if (step.value <= 1 || step.value >= 4) return
+  clearFeedback()
+  step.value -= 1
 }
 
 async function runSetup() {
   loading.value = true
-  error.value = ''
+  clearFeedback()
 
   try {
-    const res = await fetch('/api/setup', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        hostname: hostname.value,
-        domain: domain.value,
-        admin_email: adminEmail.value,
-        admin_password: adminPassword.value,
-      }),
+    const data = await api.runSetup({
+      hostname: form.value.hostname,
+      domain: form.value.domain,
+      admin_email: form.value.adminEmail,
+      admin_password: form.value.adminPassword,
     })
 
-    if (!res.ok) {
-      const text = await res.text()
-      throw new Error(text || 'Setup failed')
-    }
-
-    const data = await res.json()
     setupResult.value = data
-
-    // Save token
     if (data.token) {
       localStorage.setItem('token', data.token)
       localStorage.setItem('user', JSON.stringify(data.user))
     }
-
+    setInitialized(true)
     step.value = 4
-  } catch (e) {
-    error.value = '设置失败：' + (e.message || '请重试')
+  } catch (err) {
+    error.value = setupErrorMessage(err)
   } finally {
     loading.value = false
   }
 }
 
-function copyToClipboard(text) {
+function setupErrorMessage(err) {
+  const message = err?.message || ''
+  if (message.includes('409') || message.includes('CONFLICT')) return '系统已经初始化，请直接登录'
+  if (message.includes('400') || message.includes('BAD_REQUEST')) return '表单信息不完整，请检查后重试'
+  return message ? `初始化失败：${message}` : '初始化失败，请稍后重试'
+}
+
+async function copyRecord(row) {
+  try {
+    await navigator.clipboard.writeText(row.value)
+    copiedKey.value = row.key
+  } catch {
+    error.value = '复制失败，请手动选择记录内容'
+  }
+}
+
+function copyAllRecords() {
+  const text = dnsRows.value.map((row) => row.value).join('\n')
   navigator.clipboard.writeText(text).then(() => {
-    copyMessage.value = '已复制到剪贴板'
+    copiedKey.value = 'all'
+  }).catch(() => {
+    error.value = '复制失败，请手动选择记录内容'
   })
 }
 </script>
 
 <template>
-  <div class="setup-page">
-    <div class="setup-container">
-      <!-- Progress bar -->
-      <div class="progress-bar">
-        <div class="progress-fill" :style="{ width: progress + '%' }"></div>
-      </div>
-
-      <!-- Step indicators -->
-      <div class="steps">
-        <div
-          v-for="i in totalSteps"
-          :key="i"
-          class="step-dot"
-          :class="{ active: i === step, completed: i < step }"
-        >
-          <span v-if="i < step">✓</span>
-          <span v-else>{{ i }}</span>
+  <main class="setup-page">
+    <section class="setup-shell">
+      <aside class="setup-rail">
+        <div class="brand-mark">K</div>
+        <div>
+          <h1>Kuria Mail</h1>
+          <p>初始化邮件服务、管理员账号和域名记录。</p>
         </div>
-      </div>
+
+        <div class="progress-track">
+          <div class="progress-fill" :style="{ height: progress + '%' }"></div>
+        </div>
+
+        <ol class="step-list">
+          <li
+            v-for="(item, index) in steps"
+            :key="item.title"
+            :class="{ active: step === index + 1, done: step > index + 1 }"
+          >
+            <span>{{ index + 1 }}</span>
+            <div>
+              <strong>{{ item.title }}</strong>
+              <small>{{ item.caption }}</small>
+            </div>
+          </li>
+        </ol>
+      </aside>
 
       <MiuixCard class="setup-card">
-        <!-- Step 1: Welcome -->
-        <div v-if="step === 1" class="step-content">
-          <div class="welcome-icon">📧</div>
-          <h1>欢迎使用 Kuria Mail</h1>
-          <p class="subtitle">让我们一起设置您的邮件服务器</p>
-          <div class="features">
-            <div class="feature">
-              <span class="feature-icon">📬</span>
-              <div>
-                <div class="feature-title">SMTP 邮件收发</div>
-                <div class="feature-desc">支持标准 SMTP 协议，兼容所有邮件客户端</div>
-              </div>
+        <div v-if="step === 1" class="panel">
+          <div class="panel-head">
+            <p class="eyebrow">第一步</p>
+            <h2>配置域名</h2>
+            <p>主机名用于 MX 记录，邮件域名用于创建第一个域和管理员邮箱。</p>
+          </div>
+
+          <div class="form-grid">
+            <label class="field">
+              <span>服务器主机名</span>
+              <MiuixInput v-model="form.hostname" placeholder="mail.example.com" />
+              <small>需要有 A/AAAA 记录指向这台服务器。</small>
+            </label>
+
+            <label class="field">
+              <span>邮件域名</span>
+              <MiuixInput v-model="form.domain" placeholder="example.com" />
+              <small>用户邮箱会使用这个域名，例如 user@example.com。</small>
+            </label>
+          </div>
+
+          <div class="preview-box">
+            <span>记录预览</span>
+            <code>{{ normalizedPreview.domain }} MX 10 {{ normalizedPreview.hostname }}</code>
+          </div>
+        </div>
+
+        <div v-else-if="step === 2" class="panel">
+          <div class="panel-head">
+            <p class="eyebrow">第二步</p>
+            <h2>创建管理员</h2>
+            <p>这个账号会同时作为 Web 管理员和第一个邮箱用户。</p>
+          </div>
+
+          <div class="form-grid">
+            <label class="field">
+              <span>管理员邮箱</span>
+              <MiuixInput v-model="form.adminEmail" placeholder="admin@example.com" />
+              <small>建议使用当前邮件域名，便于后续收发测试。</small>
+            </label>
+
+            <label class="field">
+              <span>密码</span>
+              <MiuixInput v-model="form.adminPassword" type="password" placeholder="至少 6 个字符" />
+              <small class="strength" :class="passwordStrength.className">
+                强度：{{ passwordStrength.label }}
+              </small>
+            </label>
+
+            <label class="field">
+              <span>确认密码</span>
+              <MiuixInput
+                v-model="form.confirmPassword"
+                type="password"
+                placeholder="再次输入密码"
+                @keyup.enter="nextStep"
+              />
+            </label>
+          </div>
+        </div>
+
+        <div v-else-if="step === 3" class="panel">
+          <div class="panel-head">
+            <p class="eyebrow">第三步</p>
+            <h2>确认初始化</h2>
+            <p>提交后会创建域名和管理员用户，并自动登录到管理后台。</p>
+          </div>
+
+          <div class="review-grid">
+            <div>
+              <span>服务器主机名</span>
+              <strong>{{ form.hostname }}</strong>
             </div>
-            <div class="feature">
-              <span class="feature-icon">📨</span>
-              <div>
-                <div class="feature-title">IMAP 邮箱访问</div>
-                <div class="feature-desc">支持 IMAP 协议，随时随地访问邮件</div>
-              </div>
+            <div>
+              <span>邮件域名</span>
+              <strong>{{ form.domain }}</strong>
             </div>
-            <div class="feature">
-              <span class="feature-icon">🌐</span>
-              <div>
-                <div class="feature-title">Web 管理界面</div>
-                <div class="feature-desc">直观的管理界面，轻松管理域名和用户</div>
-              </div>
+            <div>
+              <span>管理员邮箱</span>
+              <strong>{{ form.adminEmail }}</strong>
             </div>
-            <div class="feature">
-              <span class="feature-icon">🔒</span>
-              <div>
-                <div class="feature-title">安全认证</div>
-                <div class="feature-desc">支持 DKIM、SPF、DMARC 邮件认证</div>
+          </div>
+
+          <div class="notice">
+            DNS 记录会在初始化完成后生成。DKIM 记录当前会先给出占位公钥，后续可在域名管理中重新生成。
+          </div>
+        </div>
+
+        <div v-else class="panel complete-panel">
+          <div class="panel-head">
+            <p class="eyebrow">完成</p>
+            <h2>初始化完成</h2>
+            <p>请把下面的记录添加到 DNS 服务商处。记录生效后再测试收发邮件。</p>
+          </div>
+
+          <div class="completion-grid">
+            <div class="account-summary">
+              <span>管理员账号</span>
+              <strong>{{ form.adminEmail }}</strong>
+              <small>已自动登录</small>
+            </div>
+            <div class="account-summary">
+              <span>Web 管理地址</span>
+              <strong>{{ form.hostname }}</strong>
+              <small>如果使用 Nginx 反代，请访问你的 HTTPS 域名。</small>
+            </div>
+          </div>
+
+          <div v-if="dnsRows.length" class="dns-section">
+            <div class="dns-head">
+              <h3>DNS 记录</h3>
+              <MiuixButton @click="copyAllRecords">
+                {{ copiedKey === 'all' ? '已复制' : '复制全部' }}
+              </MiuixButton>
+            </div>
+
+            <div class="dns-list">
+              <div v-for="row in dnsRows" :key="row.key" class="dns-row">
+                <div class="dns-meta">
+                  <span>{{ row.label }}</span>
+                  <small>{{ row.purpose }}</small>
+                </div>
+                <code>{{ row.value }}</code>
+                <MiuixButton @click="copyRecord(row)">
+                  {{ copiedKey === row.key ? '已复制' : '复制' }}
+                </MiuixButton>
               </div>
             </div>
           </div>
         </div>
 
-        <!-- Step 2: Domain Settings -->
-        <div v-if="step === 2" class="step-content">
-          <h1>🌐 域名设置</h1>
-          <p class="subtitle">配置您的邮件服务器域名</p>
-
-          <div class="form-group">
-            <label>服务器主机名</label>
-            <MiuixInput v-model="hostname" placeholder="例如：mail.example.com" />
-            <p class="hint">这是您邮件服务器的完整域名，需要有 A 记录指向服务器 IP</p>
-          </div>
-
-          <div class="form-group">
-            <label>邮件域名</label>
-            <MiuixInput v-model="domain" placeholder="例如：example.com" />
-            <p class="hint">用户邮箱将使用此域名，如 user@example.com</p>
-          </div>
-        </div>
-
-        <!-- Step 3: Admin Account -->
-        <div v-if="step === 3" class="step-content">
-          <h1>👤 管理员账号</h1>
-          <p class="subtitle">创建您的管理员邮箱账号</p>
-
-          <div class="form-group">
-            <label>管理员邮箱</label>
-            <MiuixInput v-model="adminEmail" placeholder="admin@example.com" />
-            <p class="hint">这将是您的登录账号和第一个邮箱</p>
-          </div>
-
-          <div class="form-group">
-            <label>密码</label>
-            <MiuixInput v-model="adminPassword" type="password" placeholder="至少 6 个字符" />
-          </div>
-
-          <div class="form-group">
-            <label>确认密码</label>
-            <MiuixInput v-model="confirmPassword" type="password" placeholder="再次输入密码" />
-          </div>
-        </div>
-
-        <!-- Step 4: Complete -->
-        <div v-if="step === 4" class="step-content">
-          <div class="success-icon">🎉</div>
-          <h1>设置完成！</h1>
-          <p class="subtitle">您的邮件服务器已准备就绪</p>
-
-          <div v-if="setupResult" class="dns-info">
-            <h3>📋 DNS 记录配置</h3>
-            <p class="dns-hint">请在您的域名 DNS 管理中添加以下记录：</p>
-            <p v-if="copyMessage" class="copy-message">{{ copyMessage }}</p>
-
-            <div class="dns-records">
-              <div class="dns-record">
-                <div class="record-header">
-                  <span class="record-type">MX</span>
-                  <MiuixButton @click="copyToClipboard(setupResult.dns_records.mx)">复制</MiuixButton>
-                </div>
-                <code>{{ setupResult.dns_records.mx }}</code>
-              </div>
-
-              <div class="dns-record">
-                <div class="record-header">
-                  <span class="record-type">TXT (SPF)</span>
-                  <MiuixButton @click="copyToClipboard(setupResult.dns_records.spf)">复制</MiuixButton>
-                </div>
-                <code>{{ setupResult.dns_records.spf }}</code>
-              </div>
-
-              <div class="dns-record">
-                <div class="record-header">
-                  <span class="record-type">TXT (DKIM)</span>
-                  <MiuixButton @click="copyToClipboard(setupResult.dns_records.dkim)">复制</MiuixButton>
-                </div>
-                <code>{{ setupResult.dns_records.dkim }}</code>
-              </div>
-
-              <div class="dns-record">
-                <div class="record-header">
-                  <span class="record-type">TXT (DMARC)</span>
-                  <MiuixButton @click="copyToClipboard(setupResult.dns_records.dmarc)">复制</MiuixButton>
-                </div>
-                <code>{{ setupResult.dns_records.dmarc }}</code>
-              </div>
-            </div>
-          </div>
-
-          <div class="account-info">
-            <h3>🔐 您的账号信息</h3>
-            <p><strong>邮箱：</strong>{{ adminEmail }}</p>
-            <p><strong>Web 界面：</strong>http://{{ hostname }}:8080</p>
-          </div>
-        </div>
-
-        <!-- Error message -->
         <p v-if="error" class="error">{{ error }}</p>
 
-        <!-- Navigation buttons -->
         <div class="actions">
-          <MiuixButton v-if="step > 1 && step < 4" @click="prevStep">
+          <MiuixButton v-if="step > 1 && step < 4" :disabled="loading" @click="prevStep">
             上一步
           </MiuixButton>
-          <div v-else></div>
+          <span v-else></span>
 
-          <MiuixButton
-            type="primary"
-            :disabled="loading"
-            @click="nextStep"
-          >
-            <template v-if="loading">设置中...</template>
-            <template v-else-if="step === 1">开始设置</template>
-            <template v-else-if="step === 3">完成设置</template>
-            <template v-else-if="step === 4">进入管理界面</template>
+          <MiuixButton type="primary" :disabled="loading" @click="nextStep">
+            <template v-if="loading">正在初始化...</template>
+            <template v-else-if="step === 3">开始初始化</template>
+            <template v-else-if="step === 4">进入管理后台</template>
             <template v-else>下一步</template>
           </MiuixButton>
         </div>
       </MiuixCard>
-    </div>
-  </div>
+    </section>
+  </main>
 </template>
 
 <style scoped>
 .setup-page {
   min-height: 100vh;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
+  padding: 28px;
   background:
-    linear-gradient(135deg, rgba(15, 118, 110, 0.92), rgba(64, 81, 59, 0.9) 52%, rgba(183, 121, 31, 0.88)),
+    linear-gradient(135deg, rgba(15, 118, 110, 0.92), rgba(54, 75, 61, 0.91) 56%, rgba(183, 121, 31, 0.88)),
     var(--m-color-bg);
-  padding: 20px;
 }
 
-.setup-container {
-  width: 100%;
-  max-width: 600px;
+.setup-shell {
+  width: min(1080px, 100%);
+  display: grid;
+  grid-template-columns: 320px minmax(0, 1fr);
+  gap: 20px;
+  align-items: stretch;
 }
 
-.progress-bar {
-  height: 4px;
-  background: rgba(255, 255, 255, 0.3);
-  border-radius: 2px;
-  margin-bottom: 24px;
+.setup-rail {
+  position: relative;
+  color: white;
+  padding: 32px;
+  border-radius: var(--app-radius);
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.18);
   overflow: hidden;
 }
 
-.progress-fill {
-  height: 100%;
-  background: white;
-  border-radius: 2px;
-  transition: width 0.3s ease;
+.brand-mark {
+  width: 52px;
+  height: 52px;
+  display: grid;
+  place-items: center;
+  margin-bottom: 18px;
+  border-radius: var(--app-radius);
+  background: rgba(255, 255, 255, 0.18);
+  font-size: 26px;
+  font-weight: 800;
 }
 
-.steps {
-  display: flex;
-  justify-content: center;
-  gap: 24px;
-  margin-bottom: 24px;
+.setup-rail h1 {
+  font-size: 30px;
+  line-height: 1.1;
+  margin-bottom: 8px;
 }
 
-.step-dot {
-  width: 36px;
-  height: 36px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
+.setup-rail p {
+  color: rgba(255, 255, 255, 0.82);
   font-size: 14px;
-  font-weight: 600;
+}
+
+.progress-track {
+  position: absolute;
+  left: 46px;
+  top: 188px;
+  bottom: 42px;
+  width: 2px;
   background: rgba(255, 255, 255, 0.2);
-  color: rgba(255, 255, 255, 0.6);
-  transition: all 0.3s ease;
 }
 
-.step-dot.active {
+.progress-fill {
+  width: 100%;
   background: white;
-  color: #667eea;
-  transform: scale(1.1);
+  transition: height 0.25s ease;
 }
 
-.step-dot.completed {
-  background: rgba(255, 255, 255, 0.8);
-  color: #27ae60;
+.step-list {
+  position: relative;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 24px;
+  margin-top: 48px;
+  list-style: none;
+}
+
+.step-list li {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr);
+  gap: 14px;
+  align-items: start;
+  color: rgba(255, 255, 255, 0.62);
+}
+
+.step-list li > span {
+  width: 28px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.2);
+  color: inherit;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.step-list li.active,
+.step-list li.done {
+  color: white;
+}
+
+.step-list li.done > span,
+.step-list li.active > span {
+  color: #0f766e;
+  background: white;
+}
+
+.step-list strong {
+  display: block;
+  font-size: 14px;
+}
+
+.step-list small {
+  display: block;
+  margin-top: 2px;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.68);
 }
 
 .setup-card {
-  padding: 40px;
+  min-height: 620px;
   border-radius: var(--app-radius);
   background: var(--m-color-card);
   box-shadow: var(--app-shadow);
 }
 
-.step-content {
-  text-align: center;
+.panel {
+  padding: 38px;
 }
 
-.welcome-icon,
-.success-icon {
-  font-size: 64px;
-  margin-bottom: 16px;
+.panel-head {
+  max-width: 620px;
+  margin-bottom: 30px;
 }
 
-h1 {
-  font-size: 24px;
+.eyebrow {
+  margin-bottom: 8px;
+  color: var(--app-info);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.panel h2 {
   color: var(--m-color-text);
+  font-size: 28px;
+  line-height: 1.15;
   margin-bottom: 8px;
 }
 
-.subtitle {
+.panel-head p:not(.eyebrow) {
   color: var(--m-color-text-secondary);
-  margin-bottom: 32px;
+  font-size: 14px;
 }
 
-.features {
-  text-align: left;
-  display: flex;
-  flex-direction: column;
-  gap: 16px;
-  margin-bottom: 32px;
+.form-grid {
+  display: grid;
+  gap: 18px;
+  max-width: 560px;
 }
 
-.feature {
-  display: flex;
-  align-items: flex-start;
-  gap: 12px;
-  padding: 12px;
-  background: var(--m-color-bg);
+.field {
+  display: grid;
+  gap: 8px;
+}
+
+.field span {
+  color: var(--m-color-text);
+  font-size: 14px;
+  font-weight: 650;
+}
+
+.field small,
+.account-summary small {
+  color: var(--m-color-text-secondary);
+  font-size: 12px;
+}
+
+.strength.weak {
+  color: var(--app-danger);
+}
+
+.strength.medium {
+  color: var(--app-warning);
+}
+
+.strength.strong {
+  color: var(--app-success);
+}
+
+.preview-box,
+.notice {
+  margin-top: 24px;
+  max-width: 640px;
+  padding: 16px;
   border-radius: var(--app-radius);
+  background: var(--m-color-bg);
+  color: var(--m-color-text-secondary);
 }
 
-.feature-icon {
-  font-size: 24px;
+.preview-box {
+  display: grid;
+  gap: 8px;
+}
+
+.preview-box span {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--m-color-text-secondary);
+}
+
+code {
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+  color: var(--m-color-text);
+  overflow-wrap: anywhere;
+}
+
+.review-grid,
+.completion-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.review-grid > div,
+.account-summary {
+  display: grid;
+  gap: 6px;
+  padding: 16px;
+  border-radius: var(--app-radius);
+  background: var(--m-color-bg);
+}
+
+.review-grid span,
+.account-summary span {
+  color: var(--m-color-text-secondary);
+  font-size: 12px;
+}
+
+.review-grid strong,
+.account-summary strong {
+  color: var(--m-color-text);
+  font-size: 15px;
+  overflow-wrap: anywhere;
+}
+
+.completion-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  margin-bottom: 22px;
+}
+
+.dns-section {
+  margin-top: 18px;
+}
+
+.dns-head,
+.dns-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dns-head {
+  margin-bottom: 12px;
+}
+
+.dns-head h3 {
+  color: var(--m-color-text);
+  font-size: 17px;
+}
+
+.dns-list {
+  display: grid;
+  gap: 10px;
+}
+
+.dns-row {
+  padding: 14px;
+  border: 1px solid var(--m-color-border);
+  border-radius: var(--app-radius);
+  background: var(--m-color-bg);
+}
+
+.dns-meta {
+  width: 118px;
   flex-shrink: 0;
 }
 
-.feature-title {
-  font-weight: 600;
-  color: var(--m-color-text);
-  margin-bottom: 2px;
-}
-
-.feature-desc {
-  font-size: 13px;
-  color: var(--m-color-text-secondary);
-}
-
-.form-group {
-  text-align: left;
-  margin-bottom: 20px;
-}
-
-.form-group label {
+.dns-meta span {
   display: block;
-  font-size: 14px;
-  font-weight: 500;
-  color: var(--m-color-text);
-  margin-bottom: 8px;
+  color: var(--app-info);
+  font-size: 12px;
+  font-weight: 800;
 }
 
-.hint {
-  font-size: 12px;
+.dns-meta small {
+  display: block;
+  margin-top: 3px;
   color: var(--m-color-text-secondary);
-  margin-top: 6px;
+  font-size: 12px;
+}
+
+.dns-row code {
+  flex: 1;
+  padding: 8px 10px;
+  border-radius: var(--app-radius);
+  background: var(--m-color-card);
 }
 
 .error {
+  margin: 0 38px;
+  padding: 12px 14px;
+  border-radius: var(--app-radius);
   color: var(--app-danger);
+  background: color-mix(in srgb, var(--app-danger) 10%, transparent);
   font-size: 14px;
-  margin-top: 16px;
-  text-align: center;
 }
 
 .actions {
   display: flex;
-  justify-content: space-between;
-  margin-top: 32px;
-}
-
-.dns-info {
-  text-align: left;
-  background: var(--m-color-bg);
-  border-radius: var(--app-radius);
-  padding: 20px;
-  margin-top: 24px;
-}
-
-.dns-info h3 {
-  margin-bottom: 8px;
-  color: var(--m-color-text);
-}
-
-.dns-hint {
-  font-size: 13px;
-  color: var(--m-color-text-secondary);
-  margin-bottom: 16px;
-}
-
-.copy-message {
-  color: var(--app-success);
-  font-size: 13px;
-  margin-bottom: 12px;
-}
-
-.dns-records {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.dns-record {
-  background: var(--m-color-card);
-  border-radius: var(--app-radius);
-  padding: 12px;
-  border: 1px solid var(--m-color-border);
-}
-
-.record-header {
-  display: flex;
-  justify-content: space-between;
   align-items: center;
-  margin-bottom: 8px;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 38px 38px;
 }
 
-.record-type {
-  font-size: 12px;
-  font-weight: 600;
-  color: var(--app-info);
-  background: color-mix(in srgb, var(--app-info) 12%, transparent);
-  padding: 2px 8px;
-  border-radius: 999px;
-}
-
-.dns-record code {
-  display: block;
-  font-size: 12px;
-  color: var(--m-color-text);
-  background: var(--m-color-bg);
-  padding: 8px;
-  border-radius: var(--app-radius);
-  word-break: break-all;
-  font-family: 'Monaco', 'Consolas', monospace;
-}
-
-.account-info {
-  text-align: left;
-  background: var(--m-color-bg);
-  border-radius: var(--app-radius);
-  padding: 20px;
-  margin-top: 16px;
-}
-
-.account-info h3 {
-  margin-bottom: 12px;
-  color: var(--m-color-text);
-}
-
-.account-info p {
-  margin-bottom: 8px;
-  color: var(--m-color-text);
-  font-size: 14px;
-}
-
-@media (max-width: 620px) {
+@media (max-width: 880px) {
   .setup-page {
-    align-items: flex-start;
+    place-items: start center;
+    padding: 18px;
   }
 
-  .setup-card {
+  .setup-shell {
+    grid-template-columns: 1fr;
+  }
+
+  .setup-rail {
     padding: 24px;
   }
 
-  .steps {
-    gap: 12px;
+  .progress-track,
+  .step-list small {
+    display: none;
   }
 
-  .record-header,
+  .step-list {
+    flex-direction: row;
+    gap: 10px;
+    margin-top: 24px;
+  }
+
+  .step-list li {
+    grid-template-columns: 28px;
+  }
+
+  .step-list div {
+    display: none;
+  }
+
+  .setup-card {
+    min-height: auto;
+  }
+}
+
+@media (max-width: 640px) {
+  .panel {
+    padding: 24px;
+  }
+
+  .panel h2 {
+    font-size: 24px;
+  }
+
+  .review-grid,
+  .completion-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .dns-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .dns-meta {
+    width: auto;
+  }
+
   .actions {
     align-items: stretch;
     flex-direction: column;
-    gap: 10px;
+    padding: 0 24px 24px;
+  }
+
+  .actions > * {
+    width: 100%;
+  }
+
+  .error {
+    margin: 0 24px;
   }
 }
 </style>

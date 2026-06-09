@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub const HOSTNAME_SETTING_KEY: &str = "server.hostname";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server: ServerConfig,
@@ -103,6 +105,14 @@ impl Config {
         let config: Config = toml::from_str(&content)?;
         Ok(config)
     }
+}
+
+pub async fn effective_hostname(config: &Config, db: &sqlx::SqlitePool) -> String {
+    crate::db::queries::get_system_setting(db, HOSTNAME_SETTING_KEY)
+        .await
+        .ok()
+        .flatten()
+        .unwrap_or_else(|| config.server.hostname.clone())
 }
 
 impl Default for Config {

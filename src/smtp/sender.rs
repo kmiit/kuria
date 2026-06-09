@@ -11,11 +11,12 @@ use crate::error::KuriaError;
 
 pub struct MailSender {
     config: Arc<Config>,
+    db: sqlx::SqlitePool,
 }
 
 impl MailSender {
-    pub fn new(config: Arc<Config>) -> Self {
-        Self { config }
+    pub fn new(config: Arc<Config>, db: sqlx::SqlitePool) -> Self {
+        Self { config, db }
     }
 
     /// Send an email to external recipients via SMTP
@@ -42,6 +43,7 @@ impl MailSender {
             domain_groups.entry(domain).or_default().push(rcpt.clone());
         }
 
+        let hostname = crate::config::effective_hostname(&self.config, &self.db).await;
         let mut errors = Vec::new();
 
         for (domain, recipients) in &domain_groups {
@@ -62,7 +64,7 @@ impl MailSender {
                 "<{}.{}@{}>",
                 uuid::Uuid::new_v4(),
                 chrono::Utc::now().timestamp(),
-                self.config.server.hostname
+                hostname
             );
             builder = builder.message_id(Some(msg_id));
 

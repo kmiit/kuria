@@ -1,23 +1,108 @@
 <script setup>
-import { ref, onMounted, computed } from 'vue'
-import { MiuixButton, MiuixInput, MiuixCard, MiuixDialog } from 'miuix-vue'
+import { computed, onMounted, ref } from 'vue'
+import { MiuixButton, MiuixCard, MiuixDialog, MiuixInput } from 'miuix-vue'
 import { api } from '../api'
 
 const domains = ref([])
 const loading = ref(true)
 const saving = ref(false)
+const generatingId = ref(null)
 const newDomain = ref('')
 const showAddDialog = ref(false)
 const message = ref('')
 const error = ref('')
-const dkimRecord = ref('')
+const expandedDomains = ref({})
 
-const normalizedDomain = computed(() =>
-  newDomain.value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, ''),
-)
+const normalizedDomain = computed(() => normalizeDomain(newDomain.value))
+
+function normalizeDomain(value) {
+  return String(value || '')
+    .trim()
+    .toLowerCase()
+    .replace(/^https?:\/\//, '')
+    .replace(/\/.*$/, '')
+    .replace(/\.$/, '')
+}
 
 function isValidDomain(value) {
   return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(value)
+}
+
+function dnsLine(host, value) {
+  return value ? `${host} IN TXT "${value}"` : ''
+}
+
+function spfValue(domain) {
+  return domain.spf_record || ''
+}
+
+function dkimSelector(domain) {
+  return domain.dkim_selector || 'kuria'
+}
+
+function dkimHost(domain) {
+  return `${dkimSelector(domain)}._domainkey.${domain.domain_name}`
+}
+
+function dkimValue(domain) {
+  return domain.dkim_public_key ? `v=DKIM1; k=rsa; p=${domain.dkim_public_key}` : ''
+}
+
+function publicKeyFingerprint(value) {
+  if (!value) return ''
+  let hash = 2166136261
+  for (let index = 0; index < value.length; index += 1) {
+    hash = Math.imul(hash ^ value.charCodeAt(index), 16777619)
+  }
+  return (hash >>> 0).toString(16).toUpperCase().padStart(8, '0')
+}
+
+function dnsRecords(domain) {
+  const spf = spfValue(domain)
+  const dkim = dkimValue(domain)
+  const fingerprint = publicKeyFingerprint(domain.dkim_public_key)
+
+  return [
+    {
+      type: 'SPF',
+      title: 'SPF 发信授权',
+      host: domain.domain_name,
+      value: spf,
+      line: dnsLine(domain.domain_name, spf),
+      ready: Boolean(spf),
+      note: '告诉收件方哪些服务器可以代表这个域名发信。',
+      detail: spf ? '已生成，添加到 DNS 的 TXT 记录即可。' : '缺少 SPF 记录。',
+      copyLabel: 'SPF 记录',
+    },
+    {
+      type: 'DKIM',
+      title: 'DKIM 签名公钥',
+      host: dkimHost(domain),
+      value: dkim,
+      line: dnsLine(dkimHost(domain), dkim),
+      ready: Boolean(dkim),
+      note: dkim
+        ? `selector ${dkimSelector(domain)}，key hash ${fingerprint}`
+        : '生成密钥后，把 TXT 记录添加到 DNS，用于验证邮件签名。',
+      detail: dkim ? '重新生成会得到新的 selector 和公钥。' : '尚未生成。',
+      copyLabel: 'DKIM 记录',
+    },
+  ]
+}
+
+function isDomainExpanded(id) {
+  return Boolean(expandedDomains.value[id])
+}
+
+function setDomainExpanded(id, expanded) {
+  expandedDomains.value = {
+    ...expandedDomains.value,
+    [id]: expanded,
+  }
+}
+
+function toggleDomainRecords(id) {
+  setDomainExpanded(id, !isDomainExpanded(id))
 }
 
 async function loadDomains() {
@@ -26,8 +111,8 @@ async function loadDomains() {
   try {
     const data = await api.getDomains()
     domains.value = data.domains || []
-  } catch (e) {
-    error.value = e.message || '加载域名失败'
+  } catch (err) {
+    error.value = err.message || '加载域名失败'
   } finally {
     loading.value = false
   }
@@ -36,19 +121,21 @@ async function loadDomains() {
 async function addDomain() {
   message.value = ''
   error.value = ''
-  if (!isValidDomain(normalizedDomain.value)) {
+  const domain = normalizedDomain.value
+  if (!isValidDomain(domain)) {
     error.value = '请输入有效域名，例如 example.com'
     return
   }
+
   saving.value = true
   try {
-    await api.createDomain(normalizedDomain.value)
+    await api.createDomain(domain)
     newDomain.value = ''
     showAddDialog.value = false
     message.value = '域名已添加'
     await loadDomains()
-  } catch (e) {
-    error.value = '添加失败：' + (e.message || '未知错误')
+  } catch (err) {
+    error.value = err.message || '添加域名失败'
   } finally {
     saving.value = false
   }
@@ -58,32 +145,54 @@ async function deleteDomain(id, name) {
   message.value = ''
   error.value = ''
   if (!confirm(`确定删除域名 ${name}？相关用户可能无法继续收发邮件。`)) return
+
   try {
     await api.deleteDomain(id)
-    domains.value = domains.value.filter((d) => d.id !== id)
+    domains.value = domains.value.filter((domain) => domain.id !== id)
     message.value = '域名已删除'
-  } catch (e) {
-    error.value = e.message || '删除失败'
+  } catch (err) {
+    error.value = err.message || '删除失败'
   }
 }
 
 async function generateDkim(domain) {
   message.value = ''
   error.value = ''
-  dkimRecord.value = ''
+  generatingId.value = domain.id
   try {
     const data = await api.generateDkim(domain.id)
-    dkimRecord.value = data.dns_record || ''
-    message.value = data.message || 'DKIM 记录已生成'
-  } catch (e) {
-    error.value = e.message || '生成 DKIM 记录失败'
+    await loadDomains()
+
+    const updatedDomain =
+      data.domain || domains.value.find((item) => item.id === domain.id) || domain
+    const selector = data.selector || dkimSelector(updatedDomain)
+    const fingerprint = publicKeyFingerprint(updatedDomain.dkim_public_key)
+    message.value = fingerprint
+      ? `DKIM 已重新生成：selector ${selector}，key hash ${fingerprint}`
+      : 'DKIM 密钥已生成'
+    setDomainExpanded(domain.id, true)
+  } catch (err) {
+    error.value = err.message || '生成 DKIM 记录失败'
+  } finally {
+    generatingId.value = null
   }
 }
 
-function copyToClipboard(text) {
-  navigator.clipboard.writeText(text).then(() => {
-    message.value = '已复制到剪贴板'
-  })
+async function copyToClipboard(text, label = '记录') {
+  if (!text) return
+  try {
+    await navigator.clipboard.writeText(text)
+    message.value = `${label}已复制`
+  } catch {
+    error.value = '复制失败，请手动选中记录复制'
+  }
+}
+
+function copyAllRecords(domain) {
+  const records = dnsRecords(domain)
+    .map((record) => record.line)
+    .filter(Boolean)
+  copyToClipboard(records.join('\n'), 'DNS 记录')
 }
 
 function formatDate(dateStr) {
@@ -99,7 +208,7 @@ onMounted(loadDomains)
     <div class="page-header">
       <div>
         <h1>域名管理</h1>
-        <p class="subtitle">管理收发邮件使用的域名与认证记录。</p>
+        <p class="subtitle">每个域名的 SPF 和 DKIM 记录放在同一张卡片里，方便复制到 DNS。</p>
       </div>
       <div class="header-actions">
         <MiuixButton @click="loadDomains">刷新</MiuixButton>
@@ -110,46 +219,87 @@ onMounted(loadDomains)
     <p v-if="message" class="notice success">{{ message }}</p>
     <p v-if="error" class="notice error">{{ error }}</p>
 
-    <MiuixCard v-if="dkimRecord">
-      <div class="card-inner dns-card">
-        <div class="dns-head">
-          <div>
-            <h2>DKIM DNS 记录</h2>
-            <p>将以下 TXT 记录添加到域名 DNS 管理中。</p>
-          </div>
-          <MiuixButton @click="copyToClipboard(dkimRecord)">复制</MiuixButton>
-        </div>
-        <code>{{ dkimRecord }}</code>
-      </div>
-    </MiuixCard>
-
-    <div v-if="loading" class="loading">加载中...</div>
+    <div v-if="loading" class="loading">正在加载域名...</div>
 
     <div v-else-if="domains.length === 0" class="empty">
-      <div class="empty-icon">🌐</div>
       <p>还没有配置域名。</p>
       <MiuixButton type="primary" @click="showAddDialog = true">添加第一个域名</MiuixButton>
     </div>
 
     <div v-else class="domain-list">
       <MiuixCard v-for="domain in domains" :key="domain.id">
-        <div class="card-inner domain-card">
-          <div class="domain-info">
-            <div class="domain-icon">🌐</div>
-            <div class="domain-copy">
+        <div class="card-inner">
+          <div class="domain-head">
+            <div class="domain-title">
               <div class="domain-name">{{ domain.domain_name }}</div>
-              <div class="domain-detail">
-                DKIM 选择器：{{ domain.dkim_selector || '未配置' }} · 创建于 {{ formatDate(domain.created_at) }}
-              </div>
-              <div class="record-tags">
-                <span :class="{ active: domain.spf_record }">SPF</span>
-                <span :class="{ active: domain.dkim_public_key }">DKIM</span>
-              </div>
+              <div class="domain-meta">创建于 {{ formatDate(domain.created_at) }}</div>
+            </div>
+            <div class="domain-actions">
+              <MiuixButton @click="copyAllRecords(domain)">复制全部</MiuixButton>
+              <MiuixButton :disabled="generatingId === domain.id" @click="generateDkim(domain)">
+                {{ generatingId === domain.id ? '生成中...' : domain.dkim_public_key ? '重新生成 DKIM' : '生成 DKIM' }}
+              </MiuixButton>
+              <MiuixButton @click="deleteDomain(domain.id, domain.domain_name)">删除</MiuixButton>
             </div>
           </div>
-          <div class="domain-actions">
-            <MiuixButton @click="generateDkim(domain)">DKIM</MiuixButton>
-            <MiuixButton @click="deleteDomain(domain.id, domain.domain_name)">删除</MiuixButton>
+
+          <div class="dns-toolbar">
+            <div class="dns-statuses">
+              <span
+                v-for="record in dnsRecords(domain)"
+                :key="record.type"
+                class="record-chip"
+                :class="{ ready: record.ready, missing: !record.ready }"
+              >
+                <strong>{{ record.type }}</strong>
+                {{ record.ready ? '可用' : '待处理' }}
+              </span>
+            </div>
+            <MiuixButton @click="toggleDomainRecords(domain.id)">
+              {{ isDomainExpanded(domain.id) ? '收起记录' : '展开记录' }}
+            </MiuixButton>
+          </div>
+
+          <div v-if="isDomainExpanded(domain.id)" class="dns-list">
+            <div
+              v-for="record in dnsRecords(domain)"
+              :key="record.type"
+              class="dns-row"
+              :class="{ missing: !record.ready }"
+            >
+              <div class="record-summary">
+                <span class="record-type">{{ record.type }}</span>
+                <div>
+                  <h2>{{ record.title }}</h2>
+                  <p>{{ record.note }}</p>
+                </div>
+              </div>
+
+              <div class="record-values">
+                <div class="record-field">
+                  <span>主机名</span>
+                  <code>{{ record.host }}</code>
+                </div>
+                <div class="record-field">
+                  <span>TXT 值</span>
+                  <code v-if="record.value">{{ record.value }}</code>
+                  <em v-else>未生成</em>
+                </div>
+              </div>
+
+              <div class="record-actions">
+                <span class="status" :class="{ ready: record.ready }">
+                  {{ record.ready ? '可用' : '待处理' }}
+                </span>
+                <small>{{ record.detail }}</small>
+                <MiuixButton
+                  :disabled="!record.line"
+                  @click="copyToClipboard(record.line, record.copyLabel)"
+                >
+                  复制
+                </MiuixButton>
+              </div>
+            </div>
           </div>
         </div>
       </MiuixCard>
@@ -173,37 +323,51 @@ onMounted(loadDomains)
 
 <style scoped>
 .domains {
-  max-width: 980px;
+  max-width: 1080px;
+}
+
+.page-header,
+.domain-head,
+.header-actions,
+.domain-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.page-header,
+.domain-head {
+  align-items: flex-start;
+  justify-content: space-between;
 }
 
 .page-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 16px;
   margin-bottom: 22px;
 }
 
 .domains h1 {
+  color: var(--m-color-text);
   font-size: 26px;
   font-weight: 700;
-  color: var(--m-color-text);
 }
 
-.subtitle {
-  margin-top: 4px;
+.subtitle,
+.domain-meta {
   color: var(--m-color-text-secondary);
   font-size: 14px;
 }
 
+.subtitle {
+  margin-top: 4px;
+}
+
 .header-actions,
 .domain-actions {
-  display: flex;
-  gap: 8px;
   flex-shrink: 0;
 }
 
-.notice {
+.notice,
+.loading,
+.empty {
   padding: 12px 14px;
   border-radius: var(--app-radius);
   margin-bottom: 14px;
@@ -223,123 +387,205 @@ onMounted(loadDomains)
 .loading,
 .empty {
   text-align: center;
-  padding: 80px 20px;
   color: var(--m-color-text-secondary);
-}
-
-.empty-icon {
-  font-size: 52px;
-  margin-bottom: 16px;
+  padding: 56px 20px;
 }
 
 .empty p {
   margin-bottom: 16px;
 }
 
+.domain-list {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
 .card-inner {
   padding: 22px;
 }
 
-.dns-card {
-  margin-bottom: 16px;
-}
-
-.dns-head {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  margin-bottom: 14px;
-}
-
-.dns-head h2 {
-  font-size: 16px;
-  color: var(--m-color-text);
-}
-
-.dns-head p {
-  color: var(--m-color-text-secondary);
-  font-size: 13px;
-  margin-top: 4px;
-}
-
-.dns-card code {
-  display: block;
-  padding: 12px;
-  background: var(--m-color-bg);
-  border-radius: var(--app-radius);
-  color: var(--m-color-text);
-  overflow-wrap: anywhere;
-  font-family: Consolas, Monaco, monospace;
-  font-size: 12px;
-}
-
-.domain-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-}
-
-.domain-card {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-}
-
-.domain-info {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  min-width: 0;
-}
-
-.domain-icon {
-  width: 42px;
-  height: 42px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--m-color-bg);
-  border-radius: var(--app-radius);
-  font-size: 24px;
-  flex-shrink: 0;
-}
-
-.domain-copy {
+.domain-title {
   min-width: 0;
 }
 
 .domain-name {
-  font-size: 16px;
-  font-weight: 700;
   color: var(--m-color-text);
-  word-break: break-word;
+  font-size: 18px;
+  font-weight: 750;
+  overflow-wrap: anywhere;
 }
 
-.domain-detail {
-  font-size: 13px;
-  color: var(--m-color-text-secondary);
+.domain-meta {
   margin-top: 3px;
 }
 
-.record-tags {
+.dns-list {
   display: flex;
-  gap: 6px;
-  margin-top: 10px;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
 }
 
-.record-tags span {
-  font-size: 11px;
-  font-weight: 700;
-  padding: 3px 7px;
-  border-radius: 999px;
-  color: var(--m-color-text-secondary);
+.dns-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 18px;
+  padding: 12px 14px;
+  border: 1px solid var(--m-color-border);
+  border-radius: var(--app-radius);
   background: var(--m-color-bg);
 }
 
-.record-tags span.active {
+.dns-statuses {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.record-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 10px;
+  border: 1px solid color-mix(in srgb, var(--m-color-border) 78%, transparent);
+  border-radius: 999px;
+  color: var(--m-color-text-secondary);
+  background: var(--m-color-card);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.record-chip strong {
+  color: var(--m-color-text);
+  font-weight: 800;
+}
+
+.record-chip.ready {
   color: var(--app-success);
-  background: color-mix(in srgb, var(--app-success) 12%, transparent);
+  background: color-mix(in srgb, var(--app-success) 10%, transparent);
+  border-color: color-mix(in srgb, var(--app-success) 26%, transparent);
+}
+
+.dns-row {
+  display: grid;
+  grid-template-columns: minmax(170px, 0.65fr) minmax(0, 1.7fr) 132px;
+  gap: 16px;
+  align-items: stretch;
+  padding: 14px;
+  border: 1px solid var(--m-color-border);
+  border-radius: var(--app-radius);
+  background: var(--m-color-bg);
+}
+
+.dns-row.missing {
+  border-style: dashed;
+}
+
+.record-summary {
+  display: flex;
+  gap: 10px;
+  min-width: 0;
+}
+
+.record-type {
+  flex-shrink: 0;
+  width: 48px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: var(--m-color-primary);
+  background: color-mix(in srgb, var(--m-color-primary) 12%, transparent);
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.record-summary h2 {
+  color: var(--m-color-text);
+  font-size: 14px;
+  font-weight: 750;
+  line-height: 1.35;
+}
+
+.record-summary p,
+.record-actions small {
+  color: var(--m-color-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.record-summary p {
+  margin-top: 4px;
+}
+
+.record-values {
+  display: grid;
+  grid-template-columns: minmax(120px, 0.68fr) minmax(0, 1.32fr);
+  gap: 10px;
+  min-width: 0;
+}
+
+.record-field {
+  min-width: 0;
+}
+
+.record-field span {
+  display: block;
+  margin-bottom: 5px;
+  color: var(--m-color-text-secondary);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.record-field code,
+.record-field em {
+  display: block;
+  min-height: 42px;
+  padding: 10px;
+  color: var(--m-color-text);
+  background: var(--m-color-card);
+  border: 1px solid color-mix(in srgb, var(--m-color-border) 70%, transparent);
+  border-radius: var(--app-radius);
+  font-family: Consolas, Monaco, monospace;
+  font-size: 12px;
+  font-style: normal;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.record-field em {
+  color: var(--m-color-text-secondary);
+  font-family: inherit;
+}
+
+.record-actions {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.status {
+  width: fit-content;
+  padding: 4px 9px;
+  border-radius: 999px;
+  color: var(--m-color-text-secondary);
+  background: var(--m-color-card);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.status.ready {
+  color: var(--app-success);
+  background: color-mix(in srgb, var(--app-success) 13%, transparent);
 }
 
 .add-form {
@@ -350,9 +596,9 @@ onMounted(loadDomains)
 }
 
 .add-form label {
+  color: var(--m-color-text);
   font-size: 14px;
   font-weight: 650;
-  color: var(--m-color-text);
 }
 
 .hint {
@@ -360,22 +606,40 @@ onMounted(loadDomains)
   font-size: 12px;
 }
 
+@media (max-width: 940px) {
+  .dns-row {
+    grid-template-columns: 1fr;
+  }
+
+  .record-actions {
+    align-items: center;
+    flex-direction: row;
+  }
+}
+
 @media (max-width: 680px) {
   .page-header,
-  .domain-card,
-  .dns-head {
+  .domain-head {
     align-items: stretch;
     flex-direction: column;
   }
 
   .header-actions,
-  .domain-actions {
-    width: 100%;
+  .domain-actions,
+  .dns-toolbar,
+  .record-actions {
+    flex-wrap: wrap;
   }
 
   .header-actions > *,
-  .domain-actions > * {
+  .domain-actions > *,
+  .dns-toolbar > button,
+  .record-actions > button {
     flex: 1;
+  }
+
+  .record-values {
+    grid-template-columns: 1fr;
   }
 }
 </style>

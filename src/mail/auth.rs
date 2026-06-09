@@ -98,7 +98,6 @@ pub fn generate_dkim_dns_record(selector: &str, domain: &str, public_key: &str) 
 }
 
 /// Generate SPF record for a domain
-#[allow(dead_code)]
 pub fn generate_spf_record(domain: &str, extra_ips: &[String]) -> String {
     let mut parts = vec!["v=spf1".to_string()];
     parts.push(format!("mx:{} -all", domain));

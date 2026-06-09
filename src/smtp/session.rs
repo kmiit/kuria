@@ -31,7 +31,7 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let hostname = config.server.hostname.clone();
+    let hostname = crate::config::effective_hostname(&config, &db).await;
 
     // Send greeting
     let greeting = format!("220 {} ESMTP Kuria Mail Server\r\n", hostname);

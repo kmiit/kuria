@@ -3,6 +3,7 @@ import { createRouter, createWebHistory } from 'vue-router'
 import App from './App.vue'
 import { setThemeMode } from 'miuix-vue'
 import 'miuix-vue/style.css'
+import { checkInitialized } from './setupState'
 
 // Router
 const router = createRouter({
@@ -26,21 +27,6 @@ const router = createRouter({
     },
   ],
 })
-
-// Check if system is initialized
-let initialized = null
-
-async function checkInitialized() {
-  if (initialized !== null) return initialized
-  try {
-    const res = await fetch('/api/setup/status')
-    const data = await res.json()
-    initialized = data.initialized
-    return initialized
-  } catch {
-    return true // Assume initialized on error
-  }
-}
 
 // Auth guard with setup check
 router.beforeEach(async (to) => {
