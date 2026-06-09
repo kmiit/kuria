@@ -1,7 +1,7 @@
 <script setup>
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute, RouterView } from 'vue-router'
-import { MiuixButton, MiuixSwitch, setThemeMode } from 'miuix-vue'
+import { MiuixButton, setThemeMode } from 'miuix-vue'
 import { api } from '../api'
 
 const router = useRouter()
@@ -19,9 +19,9 @@ const navItems = [
   { path: '/', name: '仪表盘', icon: '📊' },
   { path: '/inbox', name: '收件箱', icon: '📥' },
   { path: '/compose', name: '写邮件', icon: '✏️' },
-  { path: '/domains', name: '域名', icon: '🌐' },
-  { path: '/users', name: '用户', icon: '👥' },
-  { path: '/settings', name: '设置', icon: '⚙️' },
+  { path: '/domains', name: '域名', icon: '🌐', admin: true },
+  { path: '/users', name: '用户', icon: '👥', admin: true },
+  { path: '/settings', name: '设置', icon: '⚙️', admin: true },
 ]
 
 const mailboxList = [
@@ -32,10 +32,30 @@ const mailboxList = [
   { id: 'Spam', name: '垃圾邮件', icon: '⚠️' },
 ]
 
+const themeOptions = [
+  { id: 'system', name: '跟随', icon: '🖥️', title: '跟随系统' },
+  { id: 'light', name: '亮色', icon: '☀️', title: '亮色模式' },
+  { id: 'dark', name: '暗色', icon: '🌙', title: '暗色模式' },
+]
+
 const mailboxCounts = ref({})
 const isDark = ref(false)
 const themeMode = ref('system')
 const sidebarOpen = ref(false)
+
+const visibleNavItems = computed(() =>
+  navItems.filter((item) => !item.admin || user.value.is_admin),
+)
+
+const totalUnread = computed(() =>
+  Object.values(mailboxCounts.value).reduce((sum, mb) => sum + (mb?.unread || 0), 0),
+)
+
+const currentTitle = computed(() => {
+  if (route.path.startsWith('/email/')) return '邮件详情'
+  const item = navItems.find((nav) => isNavActive(nav))
+  return item?.name || 'Kuria Mail'
+})
 
 let mediaQuery = null
 let mediaHandler = null
@@ -94,17 +114,13 @@ watch(() => route.path, (path) => {
   sidebarOpen.value = false
 })
 
-function onThemeChange(val) {
-  isDark.value = val
-  const mode = val ? 'dark' : 'light'
-  themeMode.value = mode
-  setThemeMode(mode)
-  localStorage.setItem('theme', mode)
-}
-
-function resetTheme() {
-  localStorage.removeItem('theme')
-  applyTheme('system')
+function setThemePreference(mode) {
+  if (mode === 'system') {
+    localStorage.removeItem('theme')
+  } else {
+    localStorage.setItem('theme', mode)
+  }
+  applyTheme(mode)
 }
 
 function logout() {
@@ -116,14 +132,21 @@ function logout() {
 function goToMailbox(id) {
   router.push({ path: '/inbox', query: { mailbox: id } })
 }
+
+function isNavActive(item) {
+  if (item.path === '/') return route.path === '/'
+  if (item.path === '/inbox') return route.path === '/inbox' || route.path.startsWith('/email/')
+  return route.path.startsWith(item.path)
+}
 </script>
 
 <template>
   <div class="layout">
     <!-- Mobile header -->
     <div class="mobile-header">
-      <MiuixButton class="menu-btn" @click="sidebarOpen = !sidebarOpen">☰</MiuixButton>
-      <span class="mobile-title">Kuria Mail</span>
+      <MiuixButton class="menu-btn" title="打开导航" @click="sidebarOpen = !sidebarOpen">☰</MiuixButton>
+      <span class="mobile-title">{{ currentTitle }}</span>
+      <span v-if="totalUnread" class="mobile-badge">{{ totalUnread }}</span>
     </div>
 
     <!-- Overlay for mobile -->
@@ -136,20 +159,24 @@ function goToMailbox(id) {
     <!-- Sidebar -->
     <aside class="sidebar" :class="{ open: sidebarOpen }">
       <div class="sidebar-header">
-        <span class="logo-icon">📧</span>
-        <span class="logo-text">Kuria Mail</span>
+        <div class="logo-icon">📧</div>
+        <div>
+          <span class="logo-text">Kuria Mail</span>
+          <span class="logo-subtitle">Mail server console</span>
+        </div>
       </div>
 
       <nav class="nav">
         <router-link
-          v-for="item in navItems"
+          v-for="item in visibleNavItems"
           :key="item.path"
           :to="item.path"
           class="nav-item"
-          :class="{ active: route.path === item.path }"
+          :class="{ active: isNavActive(item) }"
         >
           <span class="nav-icon">{{ item.icon }}</span>
           <span class="nav-label">{{ item.name }}</span>
+          <span v-if="item.path === '/inbox' && totalUnread" class="nav-badge">{{ totalUnread }}</span>
         </router-link>
       </nav>
 
@@ -165,6 +192,9 @@ function goToMailbox(id) {
         >
           <span class="mailbox-icon">{{ mb.icon }}</span>
           <span class="mailbox-name">{{ mb.name }}</span>
+          <span v-if="mailboxCounts[mb.id]?.total" class="mailbox-total">
+            {{ mailboxCounts[mb.id].total }}
+          </span>
           <span v-if="mailboxCounts[mb.id]?.unread" class="mailbox-badge">
             {{ mailboxCounts[mb.id].unread }}
           </span>
@@ -174,15 +204,24 @@ function goToMailbox(id) {
       <div class="sidebar-footer">
         <div class="user-info">
           <span class="user-avatar">👤</span>
-          <span class="user-email">{{ user.email }}</span>
+          <span class="user-email">{{ user.email || '未登录' }}</span>
+          <span v-if="user.is_admin" class="role-badge">Admin</span>
         </div>
 
-        <div class="theme-toggle">
-          <div class="theme-left" @click="resetTheme" title="跟随系统">
-            <span class="theme-icon">{{ isDark ? '🌙' : '☀️' }}</span>
-            <span class="theme-label">{{ themeMode === 'system' ? '跟随系统' : (isDark ? '暗色' : '亮色') }}</span>
-          </div>
-          <MiuixSwitch :modelValue="isDark" @update:modelValue="onThemeChange" />
+        <div class="theme-toggle" aria-label="主题模式">
+          <button
+            v-for="option in themeOptions"
+            :key="option.id"
+            type="button"
+            class="theme-option"
+            :class="{ active: themeMode === option.id }"
+            :title="option.title"
+            :aria-pressed="themeMode === option.id"
+            @click="setThemePreference(option.id)"
+          >
+            <span class="theme-icon">{{ option.icon }}</span>
+            <span>{{ option.name }}</span>
+          </button>
         </div>
 
         <MiuixButton class="logout-btn" @click="logout">退出登录</MiuixButton>
@@ -212,7 +251,7 @@ function goToMailbox(id) {
 }
 
 .sidebar {
-  width: 240px;
+  width: 264px;
   background: var(--m-color-card);
   border-right: 1px solid var(--m-color-border);
   display: flex;
@@ -226,7 +265,7 @@ function goToMailbox(id) {
 }
 
 .sidebar-header {
-  padding: 20px;
+  padding: 22px 18px;
   display: flex;
   align-items: center;
   gap: 12px;
@@ -234,13 +273,29 @@ function goToMailbox(id) {
 }
 
 .logo-icon {
-  font-size: 28px;
+  width: 40px;
+  height: 40px;
+  border-radius: var(--app-radius);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--m-color-bg);
+  font-size: 22px;
+  flex-shrink: 0;
 }
 
 .logo-text {
+  display: block;
   font-size: 18px;
   font-weight: 600;
   color: var(--m-color-text);
+}
+
+.logo-subtitle {
+  display: block;
+  font-size: 11px;
+  color: var(--m-color-text-secondary);
+  margin-top: 2px;
 }
 
 .nav {
@@ -254,8 +309,8 @@ function goToMailbox(id) {
   display: flex;
   align-items: center;
   gap: 12px;
-  padding: 10px 16px;
-  border-radius: 10px;
+  padding: 10px 12px;
+  border-radius: var(--app-radius);
   text-decoration: none;
   color: var(--m-color-text-secondary);
   font-size: 14px;
@@ -276,6 +331,26 @@ function goToMailbox(id) {
   font-size: 18px;
   width: 24px;
   text-align: center;
+}
+
+.nav-label {
+  flex: 1;
+}
+
+.nav-badge,
+.mobile-badge,
+.role-badge {
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  border-radius: 999px;
+}
+
+.nav-badge,
+.mobile-badge {
+  background: var(--app-danger);
+  color: white;
+  padding: 4px 7px;
 }
 
 .mailboxes {
@@ -322,6 +397,12 @@ function goToMailbox(id) {
 
 .mailbox-name {
   flex: 1;
+  min-width: 0;
+}
+
+.mailbox-total {
+  font-size: 11px;
+  color: var(--m-color-text-secondary);
 }
 
 .mailbox-badge {
@@ -354,7 +435,7 @@ function goToMailbox(id) {
   gap: 8px;
   padding: 10px 12px;
   background: var(--m-color-bg);
-  border-radius: 10px;
+  border-radius: var(--app-radius);
 }
 
 .user-avatar {
@@ -370,29 +451,51 @@ function goToMailbox(id) {
   flex: 1;
 }
 
-.theme-toggle {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 8px 12px;
-  background: var(--m-color-bg);
-  border-radius: 10px;
+.role-badge {
+  background: color-mix(in srgb, var(--m-color-primary) 18%, transparent);
+  color: var(--m-color-primary);
+  padding: 4px 6px;
 }
 
-.theme-left {
+.theme-toggle {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  padding: 4px;
+  background: var(--m-color-bg);
+  border-radius: var(--app-radius);
+}
+
+.theme-option {
   display: flex;
   align-items: center;
-  gap: 6px;
+  justify-content: center;
+  gap: 4px;
+  min-width: 0;
+  min-height: 34px;
+  padding: 6px 4px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--m-color-text-secondary);
   cursor: pointer;
+  font-size: 12px;
+  transition: background 0.2s, color 0.2s;
+}
+
+.theme-option:hover {
+  background: var(--m-color-hover);
+  color: var(--m-color-text);
+}
+
+.theme-option.active {
+  background: var(--m-color-primary);
+  color: white;
 }
 
 .theme-icon {
-  font-size: 16px;
-}
-
-.theme-label {
-  font-size: 13px;
-  color: var(--m-color-text);
+  font-size: 14px;
+  line-height: 1;
 }
 
 .logout-btn {
@@ -401,9 +504,10 @@ function goToMailbox(id) {
 
 .main {
   flex: 1;
-  margin-left: 240px;
-  padding: 24px 32px;
+  margin-left: 264px;
+  padding: 28px 36px;
   min-height: 100vh;
+  min-width: 0;
 }
 
 /* Mobile responsive */
@@ -431,6 +535,7 @@ function goToMailbox(id) {
     font-size: 16px;
     font-weight: 600;
     color: var(--m-color-text);
+    flex: 1;
   }
 
   .sidebar-overlay {
@@ -454,6 +559,12 @@ function goToMailbox(id) {
   .main {
     margin-left: 0;
     padding: 72px 16px 24px;
+  }
+}
+
+@media (max-width: 480px) {
+  .sidebar {
+    width: min(88vw, 320px);
   }
 }
 </style>

@@ -9,11 +9,14 @@ const route = useRoute()
 
 const emails = ref([])
 const loading = ref(true)
+const error = ref('')
 const searchQuery = ref('')
 const searchInput = ref('')
 const currentMailbox = ref('INBOX')
 const page = ref(1)
 const total = ref(0)
+const selectedIds = ref([])
+const bulkMoveTarget = ref('')
 const perPage = 50
 
 const mailboxTabs = [
@@ -25,20 +28,34 @@ const mailboxTabs = [
 ]
 
 const totalPages = computed(() => Math.ceil(total.value / perPage) || 1)
+const selectedCount = computed(() => selectedIds.value.length)
+const allSelected = computed(() =>
+  emails.value.length > 0 && selectedIds.value.length === emails.value.length,
+)
+const pageStart = computed(() => (total.value === 0 ? 0 : (page.value - 1) * perPage + 1))
+const pageEnd = computed(() => Math.min(page.value * perPage, total.value))
+const currentMailboxLabel = computed(() =>
+  mailboxTabs.find((m) => m.id === currentMailbox.value)?.name || '收件箱',
+)
 
 async function loadEmails() {
   loading.value = true
+  error.value = ''
+  selectedIds.value = []
+  bulkMoveTarget.value = ''
   try {
     let data
     if (searchQuery.value) {
-      data = await api.searchEmails(searchQuery.value, page.value)
+      data = await api.searchEmails(searchQuery.value, page.value, perPage)
     } else {
-      data = await api.getEmails(currentMailbox.value, page.value)
+      data = await api.getEmails(currentMailbox.value, page.value, perPage)
     }
     emails.value = data.emails || []
     total.value = data.total || 0
   } catch (e) {
-    console.error(e)
+    emails.value = []
+    total.value = 0
+    error.value = e.message || '加载邮件失败'
   } finally {
     loading.value = false
   }
@@ -49,14 +66,14 @@ function openEmail(email) {
 }
 
 async function deleteEmail(id) {
-  if (confirm('确定删除这封邮件？')) {
-    try {
-      await api.deleteEmail(id)
-      emails.value = emails.value.filter((e) => e.id !== id)
-      total.value--
-    } catch (e) {
-      console.error(e)
-    }
+  if (!confirm('确定删除这封邮件？')) return
+  try {
+    await api.deleteEmail(id)
+    emails.value = emails.value.filter((e) => e.id !== id)
+    selectedIds.value = selectedIds.value.filter((selected) => selected !== id)
+    total.value = Math.max(0, total.value - 1)
+  } catch (e) {
+    error.value = e.message || '删除失败'
   }
 }
 
@@ -83,7 +100,7 @@ function switchMailbox(id) {
 }
 
 function goPage(p) {
-  page.value = p
+  page.value = Math.min(Math.max(1, p), totalPages.value)
   loadEmails()
 }
 
@@ -107,6 +124,66 @@ function parseRecipients(recipients) {
   }
 }
 
+function primaryLine(email) {
+  if (currentMailbox.value === 'Sent') return `发给 ${parseRecipients(email.recipients)}`
+  return email.sender
+}
+
+function toggleSelection(id) {
+  if (selectedIds.value.includes(id)) {
+    selectedIds.value = selectedIds.value.filter((selected) => selected !== id)
+  } else {
+    selectedIds.value = [...selectedIds.value, id]
+  }
+}
+
+function toggleSelectAll() {
+  selectedIds.value = allSelected.value ? [] : emails.value.map((email) => email.id)
+}
+
+async function bulkMarkRead() {
+  if (!selectedCount.value) return
+  try {
+    await Promise.all(selectedIds.value.map((id) => api.markRead(id)))
+    emails.value = emails.value.map((email) =>
+      selectedIds.value.includes(email.id) ? { ...email, is_read: true } : email,
+    )
+    selectedIds.value = []
+  } catch (e) {
+    error.value = e.message || '标记已读失败'
+  }
+}
+
+async function bulkDelete() {
+  if (!selectedCount.value) return
+  if (!confirm(`确定删除选中的 ${selectedCount.value} 封邮件？`)) return
+  const ids = [...selectedIds.value]
+  try {
+    await Promise.all(ids.map((id) => api.deleteEmail(id)))
+    emails.value = emails.value.filter((email) => !ids.includes(email.id))
+    total.value = Math.max(0, total.value - ids.length)
+    selectedIds.value = []
+  } catch (e) {
+    error.value = e.message || '批量删除失败'
+  }
+}
+
+async function bulkMove() {
+  if (!selectedCount.value || !bulkMoveTarget.value) return
+  const ids = [...selectedIds.value]
+  try {
+    await Promise.all(ids.map((id) => api.moveEmail(id, bulkMoveTarget.value)))
+    if (!searchQuery.value && bulkMoveTarget.value !== currentMailbox.value) {
+      emails.value = emails.value.filter((email) => !ids.includes(email.id))
+      total.value = Math.max(0, total.value - ids.length)
+    }
+    selectedIds.value = []
+    bulkMoveTarget.value = ''
+  } catch (e) {
+    error.value = e.message || '移动邮件失败'
+  }
+}
+
 onMounted(() => {
   if (route.query.mailbox) {
     currentMailbox.value = route.query.mailbox
@@ -127,41 +204,78 @@ watch(() => route.query.mailbox, (mb) => {
 
 <template>
   <div class="inbox">
-    <div class="header">
-      <h1>{{ searchQuery ? '搜索结果' : (mailboxTabs.find(m => m.id === currentMailbox)?.name || '收件箱') }}</h1>
-      <MiuixButton @click="loadEmails">刷新</MiuixButton>
+    <div class="page-header">
+      <div>
+        <h1>{{ searchQuery ? '搜索结果' : currentMailboxLabel }}</h1>
+        <p class="subtitle">
+          <template v-if="searchQuery">正在搜索“{{ searchQuery }}”</template>
+          <template v-else>{{ total }} 封邮件</template>
+        </p>
+      </div>
+      <div class="header-actions">
+        <MiuixButton @click="loadEmails">刷新</MiuixButton>
+        <MiuixButton type="primary" @click="router.push('/compose')">写邮件</MiuixButton>
+      </div>
     </div>
 
-    <!-- Search bar -->
+    <div v-if="error" class="notice error">{{ error }}</div>
+
     <div class="search-bar">
       <MiuixInput
         v-model="searchInput"
-        placeholder="搜索邮件主题、发件人、内容..."
+        placeholder="搜索主题、发件人或内容"
         @keyup.enter="doSearch"
       />
       <MiuixButton @click="doSearch">搜索</MiuixButton>
       <MiuixButton v-if="searchQuery" @click="clearSearch">清除</MiuixButton>
     </div>
 
-    <!-- Mailbox tabs -->
     <div v-if="!searchQuery" class="mailbox-tabs">
-      <div
+      <button
         v-for="mb in mailboxTabs"
         :key="mb.id"
         class="tab"
         :class="{ active: currentMailbox === mb.id }"
+        type="button"
         @click="switchMailbox(mb.id)"
       >
         <span class="tab-icon">{{ mb.icon }}</span>
         <span class="tab-name">{{ mb.name }}</span>
+      </button>
+    </div>
+
+    <div v-if="selectedCount" class="bulk-bar">
+      <label class="select-all">
+        <input type="checkbox" :checked="allSelected" @change="toggleSelectAll" />
+        已选 {{ selectedCount }} 封
+      </label>
+      <div class="bulk-actions">
+        <MiuixButton @click="bulkMarkRead">标记已读</MiuixButton>
+        <select v-model="bulkMoveTarget" class="bulk-select" @change="bulkMove">
+          <option value="">移动到...</option>
+          <option
+            v-for="mb in mailboxTabs"
+            :key="mb.id"
+            :value="mb.id"
+            :disabled="mb.id === currentMailbox"
+          >
+            {{ mb.name }}
+          </option>
+        </select>
+        <MiuixButton @click="bulkDelete">删除</MiuixButton>
       </div>
     </div>
+    <label v-else-if="emails.length" class="select-all idle">
+      <input type="checkbox" :checked="allSelected" @change="toggleSelectAll" />
+      选择本页
+    </label>
 
     <div v-if="loading" class="loading">加载中...</div>
 
     <div v-else-if="emails.length === 0" class="empty">
       <div class="empty-icon">📭</div>
       <p>{{ searchQuery ? '没有找到匹配的邮件' : '暂无邮件' }}</p>
+      <MiuixButton v-if="searchQuery" @click="clearSearch">返回 {{ currentMailboxLabel }}</MiuixButton>
     </div>
 
     <div v-else>
@@ -169,75 +283,111 @@ watch(() => route.query.mailbox, (mb) => {
         <MiuixCard
           v-for="email in emails"
           :key="email.id"
-          :class="{ unread: !email.is_read }"
-          @click="openEmail(email)"
+          :class="{ unread: !email.is_read, selected: selectedIds.includes(email.id) }"
         >
-          <div class="card-inner email-item">
+          <div class="card-inner email-item" @click="openEmail(email)">
+            <input
+              class="email-check"
+              type="checkbox"
+              :checked="selectedIds.includes(email.id)"
+              @click.stop
+              @change="toggleSelection(email.id)"
+            />
             <div class="email-avatar">
-              {{ email.sender?.charAt(0)?.toUpperCase() || '?' }}
+              {{ primaryLine(email)?.charAt(0)?.toUpperCase() || '?' }}
             </div>
             <div class="email-content">
               <div class="email-header">
-                <span class="email-sender">{{ email.sender }}</span>
+                <span class="email-sender">{{ primaryLine(email) }}</span>
                 <span class="email-date">{{ formatDate(email.created_at) }}</span>
               </div>
               <div class="email-subject">{{ email.subject || '(无主题)' }}</div>
               <div class="email-preview">
-                {{ (email.body_text || '').substring(0, 120) }}
+                {{ (email.body_text || '').substring(0, 140) || '无正文预览' }}
               </div>
             </div>
             <MiuixButton
               class="delete-btn"
+              title="删除"
               @click.stop="deleteEmail(email.id)"
             >
-              🗑️
+              删除
             </MiuixButton>
           </div>
         </MiuixCard>
       </div>
 
-      <!-- Pagination -->
-      <div v-if="totalPages > 1" class="pagination">
-        <MiuixButton :disabled="page <= 1" @click="goPage(page - 1)">上一页</MiuixButton>
-        <span class="page-info">{{ page }} / {{ totalPages }}</span>
-        <MiuixButton :disabled="page >= totalPages" @click="goPage(page + 1)">下一页</MiuixButton>
+      <div class="pagination">
+        <span class="page-range">显示 {{ pageStart }}-{{ pageEnd }} / {{ total }}</span>
+        <div class="page-actions">
+          <MiuixButton :disabled="page <= 1" @click="goPage(page - 1)">上一页</MiuixButton>
+          <span class="page-info">{{ page }} / {{ totalPages }}</span>
+          <MiuixButton :disabled="page >= totalPages" @click="goPage(page + 1)">下一页</MiuixButton>
+        </div>
       </div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.inbox {
+  max-width: 1120px;
+}
+
+.page-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+  margin-bottom: 18px;
+}
+
 .inbox h1 {
-  font-size: 24px;
-  font-weight: 600;
+  font-size: 26px;
+  font-weight: 700;
   color: var(--m-color-text);
 }
 
-.header {
+.subtitle {
+  margin-top: 4px;
+  font-size: 14px;
+  color: var(--m-color-text-secondary);
+}
+
+.header-actions {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  margin-bottom: 16px;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.notice {
+  padding: 12px 14px;
+  border-radius: var(--app-radius);
+  margin-bottom: 14px;
+  background: var(--m-color-card);
+}
+
+.notice.error {
+  color: var(--app-danger);
+  border: 1px solid color-mix(in srgb, var(--app-danger) 32%, transparent);
 }
 
 .search-bar {
-  display: flex;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 8px;
-  margin-bottom: 16px;
+  margin-bottom: 14px;
   align-items: center;
-}
-
-.search-bar > :first-child {
-  flex: 1;
 }
 
 .mailbox-tabs {
   display: flex;
   gap: 4px;
-  margin-bottom: 20px;
+  margin-bottom: 14px;
   padding: 4px;
   background: var(--m-color-card);
-  border-radius: 12px;
+  border: 1px solid var(--m-color-border);
+  border-radius: var(--app-radius);
   overflow-x: auto;
 }
 
@@ -245,11 +395,13 @@ watch(() => route.query.mailbox, (mb) => {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 8px 16px;
-  border-radius: 8px;
+  padding: 8px 14px;
+  border: 0;
+  border-radius: 6px;
   cursor: pointer;
   font-size: 13px;
   color: var(--m-color-text-secondary);
+  background: transparent;
   transition: all 0.2s;
   white-space: nowrap;
 }
@@ -264,8 +416,39 @@ watch(() => route.query.mailbox, (mb) => {
   color: white;
 }
 
-.tab-icon {
-  font-size: 16px;
+.bulk-bar,
+.select-all.idle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 12px;
+  padding: 10px 12px;
+  border-radius: var(--app-radius);
+  background: var(--m-color-card);
+  border: 1px solid var(--m-color-border);
+}
+
+.select-all {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--m-color-text-secondary);
+  font-size: 13px;
+}
+
+.bulk-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.bulk-select {
+  min-height: 36px;
+  padding: 0 10px;
+  background: var(--m-color-card);
+  color: var(--m-color-text);
 }
 
 .loading,
@@ -276,25 +459,33 @@ watch(() => route.query.mailbox, (mb) => {
 }
 
 .empty-icon {
-  font-size: 56px;
-  margin-bottom: 20px;
+  font-size: 52px;
+  margin-bottom: 16px;
+}
+
+.empty p {
+  margin-bottom: 16px;
 }
 
 .card-inner {
-  padding: 20px;
+  padding: 16px 18px;
 }
 
 .email-list {
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 8px;
 }
 
 .email-item {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 14px;
   cursor: pointer;
+}
+
+.selected {
+  outline: 2px solid var(--app-focus);
 }
 
 .unread {
@@ -303,20 +494,26 @@ watch(() => route.query.mailbox, (mb) => {
 
 .unread .email-sender,
 .unread .email-subject {
-  font-weight: 600;
+  font-weight: 700;
+}
+
+.email-check {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
 }
 
 .email-avatar {
-  width: 44px;
-  height: 44px;
+  width: 42px;
+  height: 42px;
   border-radius: 50%;
   background: var(--m-color-primary);
   color: white;
   display: flex;
   align-items: center;
   justify-content: center;
-  font-size: 18px;
-  font-weight: 600;
+  font-size: 17px;
+  font-weight: 700;
   flex-shrink: 0;
 }
 
@@ -328,12 +525,16 @@ watch(() => route.query.mailbox, (mb) => {
 .email-header {
   display: flex;
   justify-content: space-between;
-  margin-bottom: 4px;
+  gap: 12px;
+  margin-bottom: 3px;
 }
 
 .email-sender {
   font-size: 14px;
   color: var(--m-color-text);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .email-date {
@@ -345,7 +546,7 @@ watch(() => route.query.mailbox, (mb) => {
 .email-subject {
   font-size: 15px;
   color: var(--m-color-text);
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -365,21 +566,72 @@ watch(() => route.query.mailbox, (mb) => {
   flex-shrink: 0;
 }
 
-.email-item:hover .delete-btn {
+.email-item:hover .delete-btn,
+.email-item:focus-within .delete-btn {
   opacity: 1;
 }
 
 .pagination {
   display: flex;
   align-items: center;
-  justify-content: center;
+  justify-content: space-between;
   gap: 16px;
-  margin-top: 24px;
+  margin-top: 20px;
   padding: 16px 0;
 }
 
+.page-actions {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+}
+
+.page-range,
 .page-info {
-  font-size: 14px;
+  font-size: 13px;
   color: var(--m-color-text-secondary);
+  white-space: nowrap;
+}
+
+@media (max-width: 720px) {
+  .page-header {
+    flex-direction: column;
+  }
+
+  .header-actions,
+  .search-bar,
+  .bulk-bar,
+  .pagination {
+    width: 100%;
+  }
+
+  .header-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .search-bar {
+    grid-template-columns: 1fr;
+  }
+
+  .bulk-bar,
+  .pagination {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .bulk-actions,
+  .page-actions {
+    justify-content: space-between;
+  }
+
+  .email-avatar {
+    display: none;
+  }
+
+  .delete-btn {
+    opacity: 1;
+  }
 }
 </style>

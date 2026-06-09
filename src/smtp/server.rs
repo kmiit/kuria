@@ -5,65 +5,61 @@ use tracing::{error, info, warn};
 
 use super::session::handle_smtp_session;
 use crate::config::Config;
+use crate::plugin::PluginManager;
 
 pub struct SmtpServer {
     config: Arc<Config>,
     db: sqlx::SqlitePool,
+    plugins: Arc<PluginManager>,
 }
 
 impl SmtpServer {
-    pub fn new(config: Arc<Config>, db: sqlx::SqlitePool) -> Self {
-        Self { config, db }
+    pub fn new(config: Arc<Config>, db: sqlx::SqlitePool, plugins: Arc<PluginManager>) -> Self {
+        Self {
+            config,
+            db,
+            plugins,
+        }
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
-        // Plain SMTP listener (port 25)
-        let plain_listener = TcpListener::bind(&self.config.smtp.listen_addr).await?;
+    pub async fn start_with_listeners(
+        &self,
+        plain_listener: TcpListener,
+        tls_listener: Option<TcpListener>,
+    ) -> anyhow::Result<()> {
         info!("SMTP server listening on {}", self.config.smtp.listen_addr);
 
         let config = self.config.clone();
         let db = self.db.clone();
 
-        // Check if TLS certs exist
-        let tls_available = config.tls.cert_path.exists() && config.tls.key_path.exists();
-
-        // TLS SMTP listener (port 465) if TLS is configured and certs exist
-        let tls_listener = if self.config.smtp.listen_addr_tls != "0.0.0.0:0" && tls_available {
-            match TcpListener::bind(&self.config.smtp.listen_addr_tls).await {
-                Ok(l) => {
-                    info!(
-                        "SMTPS server listening on {}",
-                        self.config.smtp.listen_addr_tls
-                    );
-                    Some(l)
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to bind SMTPS listener on {}: {}",
-                        self.config.smtp.listen_addr_tls, e
-                    );
-                    None
-                }
-            }
-        } else {
-            if self.config.smtp.listen_addr_tls != "0.0.0.0:0" && !tls_available {
+        if self.config.smtp.listen_addr_tls != "0.0.0.0:0" && tls_listener.is_none() {
+            let tls_available = config.tls.cert_path.exists() && config.tls.key_path.exists();
+            if !tls_available {
                 warn!(
                     "SMTPS disabled: TLS certificates not found at {:?} / {:?}",
                     config.tls.cert_path, config.tls.key_path
                 );
             }
-            None
-        };
+        }
+
+        if tls_listener.is_some() {
+            info!(
+                "SMTPS server listening on {}",
+                self.config.smtp.listen_addr_tls
+            );
+        }
 
         // Spawn plain SMTP handler
         let config1 = config.clone();
         let db1 = db.clone();
+        let plugins1 = self.plugins.clone();
         tokio::spawn(async move {
             loop {
                 match plain_listener.accept().await {
                     Ok((stream, addr)) => {
                         let config = config1.clone();
                         let db = db1.clone();
+                        let plugins = plugins1.clone();
                         let peer_addr = addr.to_string();
                         tokio::spawn(async move {
                             info!("SMTP connection from {}", peer_addr);
@@ -74,6 +70,7 @@ impl SmtpServer {
                                 write_half,
                                 config,
                                 db,
+                                plugins,
                                 peer_addr.clone(),
                                 false,
                             )
@@ -92,6 +89,7 @@ impl SmtpServer {
         if let Some(tls_listener) = tls_listener {
             let config2 = config.clone();
             let db2 = db.clone();
+            let plugins2 = self.plugins.clone();
             tokio::spawn(async move {
                 let tls_config = match crate::tls::config::load_tls_config(
                     &config2.tls.cert_path,
@@ -111,6 +109,7 @@ impl SmtpServer {
                             let acceptor = acceptor.clone();
                             let config = config2.clone();
                             let db = db2.clone();
+                            let plugins = plugins2.clone();
                             let peer_addr = addr.to_string();
                             tokio::spawn(async move {
                                 info!("SMTPS connection from {}", peer_addr);
@@ -123,6 +122,7 @@ impl SmtpServer {
                                             write_half,
                                             config,
                                             db,
+                                            plugins,
                                             peer_addr.clone(),
                                             true,
                                         )

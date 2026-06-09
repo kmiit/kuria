@@ -43,3 +43,11 @@ key_path = "./data/certs/key.pem"
 key_size = 2048
 # DKIM 选择器
 selector = "kuria"
+
+[plugins]
+# 是否启用插件系统
+enabled = false
+# 插件目录 (可选, 用于自动发现)
+# directory = "./plugins"
+# 插件路径列表
+paths = []

@@ -1,7 +1,7 @@
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
     pub server: ServerConfig,
     pub smtp: SmtpConfig,
@@ -10,50 +10,58 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub tls: TlsConfig,
     pub dkim: DkimConfig,
+    pub plugins: Option<PluginsConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ServerConfig {
     pub hostname: String,
     pub data_dir: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SmtpConfig {
     pub listen_addr: String,
     pub listen_addr_tls: String,
     pub enable_starttls: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct ImapConfig {
     pub listen_addr: String,
     pub listen_addr_tls: String,
     pub enable_starttls: bool,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WebConfig {
     pub listen_addr: String,
     pub jwt_secret: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DatabaseConfig {
     pub url: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct TlsConfig {
     pub cert_path: PathBuf,
     pub key_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DkimConfig {
     #[allow(dead_code)]
     pub key_size: u32,
     pub selector: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PluginsConfig {
+    pub enabled: bool,
+    pub paths: Vec<String>,
+    pub directory: Option<String>,
 }
 
 impl Config {
@@ -97,6 +105,7 @@ impl Default for Config {
                 key_size: 2048,
                 selector: "kuria".to_string(),
             },
+            plugins: None,
         }
     }
 }

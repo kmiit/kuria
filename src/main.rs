@@ -4,12 +4,14 @@ mod dns;
 mod error;
 mod imap;
 mod mail;
+mod plugin;
 mod smtp;
 mod tls;
 mod web;
 
 use clap::Parser;
 use std::sync::{Arc, Mutex};
+use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
 
 use config::Config;
@@ -80,6 +82,81 @@ fn start_vite_dev_server() {
     }
 }
 
+struct BoundListeners {
+    smtp: TcpListener,
+    smtps: Option<TcpListener>,
+    imap: TcpListener,
+    imaps: Option<TcpListener>,
+    web: TcpListener,
+}
+
+fn listener_disabled(addr: &str) -> bool {
+    addr.parse::<std::net::SocketAddr>()
+        .map(|addr| addr.port() == 0)
+        .unwrap_or(false)
+}
+
+fn bind_error_hint(error: &std::io::Error) -> &'static str {
+    match error.kind() {
+        std::io::ErrorKind::AddrInUse => "端口已被占用",
+        std::io::ErrorKind::PermissionDenied => "权限不足，可能需要管理员权限或更换端口",
+        std::io::ErrorKind::AddrNotAvailable => "监听地址在本机不可用",
+        _ => "无法监听该地址",
+    }
+}
+
+async fn bind_endpoint(label: &str, addr: &str, errors: &mut Vec<String>) -> Option<TcpListener> {
+    match TcpListener::bind(addr).await {
+        Ok(listener) => Some(listener),
+        Err(error) => {
+            errors.push(format!(
+                "{} ({})：{} ({})",
+                label,
+                addr,
+                bind_error_hint(&error),
+                error
+            ));
+            None
+        }
+    }
+}
+
+async fn bind_service_listeners(config: &Config) -> anyhow::Result<BoundListeners> {
+    let tls_available = config.tls.cert_path.exists() && config.tls.key_path.exists();
+    let mut errors = Vec::new();
+
+    let smtp = bind_endpoint("SMTP", &config.smtp.listen_addr, &mut errors).await;
+    let smtps = if !listener_disabled(&config.smtp.listen_addr_tls) && tls_available {
+        bind_endpoint("SMTPS", &config.smtp.listen_addr_tls, &mut errors).await
+    } else {
+        None
+    };
+
+    let imap = bind_endpoint("IMAP", &config.imap.listen_addr, &mut errors).await;
+    let imaps = if !listener_disabled(&config.imap.listen_addr_tls) && tls_available {
+        bind_endpoint("IMAPS", &config.imap.listen_addr_tls, &mut errors).await
+    } else {
+        None
+    };
+
+    let web = bind_endpoint("Web UI", &config.web.listen_addr, &mut errors).await;
+
+    if !errors.is_empty() {
+        anyhow::bail!(
+            "端口占用检测失败，Kuria 未启动任何服务。\n{}\n请停止占用进程，或修改 config.toml 中对应的 listen_addr。",
+            errors.join("\n")
+        );
+    }
+
+    Ok(BoundListeners {
+        smtp: smtp.expect("SMTP listener must be bound when no errors were reported"),
+        smtps,
+        imap: imap.expect("IMAP listener must be bound when no errors were reported"),
+        imaps,
+        web: web.expect("Web listener must be bound when no errors were reported"),
+    })
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize logging
@@ -130,6 +207,12 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let listeners = bind_service_listeners(&config).await?;
+
+    // Load plugins
+    let plugin_manager = Arc::new(plugin::PluginManager::load(&config)?);
+    plugin_manager.call_init(&config);
+
     // In debug mode, start the Vite dev server for frontend hot-reload.
     // The CARGO env var is set by `cargo run` but not when running the binary directly.
     let is_cargo_run = std::env::var("CARGO").is_ok();
@@ -137,14 +220,18 @@ async fn main() -> anyhow::Result<()> {
         start_vite_dev_server();
     }
 
-    // Start services
-
     // SMTP Server
     let smtp_config = config.clone();
     let smtp_db = db.clone();
+    let smtp_plugins = plugin_manager.clone();
+    let smtp_listener = listeners.smtp;
+    let smtps_listener = listeners.smtps;
     tokio::spawn(async move {
-        let server = smtp::server::SmtpServer::new(smtp_config, smtp_db);
-        if let Err(e) = server.start().await {
+        let server = smtp::server::SmtpServer::new(smtp_config, smtp_db, smtp_plugins);
+        if let Err(e) = server
+            .start_with_listeners(smtp_listener, smtps_listener)
+            .await
+        {
             tracing::error!("SMTP server error: {}", e);
         }
     });
@@ -152,9 +239,14 @@ async fn main() -> anyhow::Result<()> {
     // IMAP Server
     let imap_config = config.clone();
     let imap_db = db.clone();
+    let imap_listener = listeners.imap;
+    let imaps_listener = listeners.imaps;
     tokio::spawn(async move {
         let server = imap::server::ImapServer::new(imap_config, imap_db);
-        if let Err(e) = server.start().await {
+        if let Err(e) = server
+            .start_with_listeners(imap_listener, imaps_listener)
+            .await
+        {
             tracing::error!("IMAP server error: {}", e);
         }
     });
@@ -162,12 +254,15 @@ async fn main() -> anyhow::Result<()> {
     // Web Server
     let web_config = config.clone();
     let web_db = db.clone();
+    let web_plugins = plugin_manager.clone();
     let web_addr = config.web.listen_addr.clone();
+    let web_listener = listeners.web;
     tokio::spawn(async move {
-        let app = web::router::create_router(web_config, web_db);
-        let listener = tokio::net::TcpListener::bind(&web_addr).await.unwrap();
+        let app = web::router::create_router(web_config, web_db, web_plugins);
         tracing::info!("Web UI listening on {}", web_addr);
-        axum::serve(listener, app).await.unwrap();
+        if let Err(e) = axum::serve(web_listener, app).await {
+            tracing::error!("Web server error: {}", e);
+        }
     });
 
     tracing::info!("Kuria Mail Server started successfully");
@@ -181,6 +276,9 @@ async fn main() -> anyhow::Result<()> {
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;
     tracing::info!("Shutting down...");
+
+    // Shut down plugins
+    plugin_manager.call_shutdown();
 
     // Kill the Vite dev server if running
     if let Ok(mut guard) = VITE_CHILD.lock()

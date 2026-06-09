@@ -19,9 +19,9 @@ const router = createRouter({
         { path: 'inbox', name: 'inbox', component: () => import('./views/Inbox.vue') },
         { path: 'email/:id', name: 'email-detail', component: () => import('./views/EmailDetail.vue') },
         { path: 'compose', name: 'compose', component: () => import('./views/Compose.vue') },
-        { path: 'domains', name: 'domains', component: () => import('./views/Domains.vue') },
-        { path: 'users', name: 'users', component: () => import('./views/Users.vue') },
-        { path: 'settings', name: 'settings', component: () => import('./views/Settings.vue') },
+        { path: 'domains', name: 'domains', component: () => import('./views/Domains.vue'), meta: { admin: true } },
+        { path: 'users', name: 'users', component: () => import('./views/Users.vue'), meta: { admin: true } },
+        { path: 'settings', name: 'settings', component: () => import('./views/Settings.vue'), meta: { admin: true } },
       ],
     },
   ],
@@ -64,6 +64,14 @@ router.beforeEach(async (to) => {
   const token = localStorage.getItem('token')
   if (!token && to.name !== 'login') {
     return { name: 'login' }
+  }
+  if (token && to.meta.admin) {
+    try {
+      const user = JSON.parse(localStorage.getItem('user') || '{}')
+      if (!user.is_admin) return { name: 'dashboard' }
+    } catch {
+      return { name: 'dashboard' }
+    }
   }
   if (token && to.name === 'login') {
     return { name: 'dashboard' }

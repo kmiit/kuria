@@ -15,44 +15,32 @@ impl ImapServer {
         Self { config, db }
     }
 
-    pub async fn start(&self) -> anyhow::Result<()> {
-        // Plain IMAP listener (port 143)
-        let plain_listener = TcpListener::bind(&self.config.imap.listen_addr).await?;
+    pub async fn start_with_listeners(
+        &self,
+        plain_listener: TcpListener,
+        tls_listener: Option<TcpListener>,
+    ) -> anyhow::Result<()> {
         info!("IMAP server listening on {}", self.config.imap.listen_addr);
 
         let config = self.config.clone();
         let db = self.db.clone();
 
-        // Check if TLS certs exist
-        let tls_available = config.tls.cert_path.exists() && config.tls.key_path.exists();
-
-        // TLS IMAP listener (port 993) if configured and certs exist
-        let tls_listener = if self.config.imap.listen_addr_tls != "0.0.0.0:0" && tls_available {
-            match TcpListener::bind(&self.config.imap.listen_addr_tls).await {
-                Ok(l) => {
-                    info!(
-                        "IMAPS server listening on {}",
-                        self.config.imap.listen_addr_tls
-                    );
-                    Some(l)
-                }
-                Err(e) => {
-                    error!(
-                        "Failed to bind IMAPS listener on {}: {}",
-                        self.config.imap.listen_addr_tls, e
-                    );
-                    None
-                }
-            }
-        } else {
-            if self.config.imap.listen_addr_tls != "0.0.0.0:0" && !tls_available {
+        if self.config.imap.listen_addr_tls != "0.0.0.0:0" && tls_listener.is_none() {
+            let tls_available = config.tls.cert_path.exists() && config.tls.key_path.exists();
+            if !tls_available {
                 warn!(
                     "IMAPS disabled: TLS certificates not found at {:?} / {:?}",
                     config.tls.cert_path, config.tls.key_path
                 );
             }
-            None
-        };
+        }
+
+        if tls_listener.is_some() {
+            info!(
+                "IMAPS server listening on {}",
+                self.config.imap.listen_addr_tls
+            );
+        }
 
         // Spawn plain IMAP handler
         let config1 = config.clone();

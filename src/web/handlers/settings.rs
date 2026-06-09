@@ -136,13 +136,60 @@ pub async fn get_settings(
         return Err(StatusCode::FORBIDDEN);
     }
 
+    let plugins = plugin_status(&state);
+
     Ok(Json(json!({
         "hostname": state.config.server.hostname,
-        "smtp_port": 25,
-        "imap_port": 143,
-        "web_port": 8080,
+        "smtp_port": listen_port(&state.config.smtp.listen_addr),
+        "imap_port": listen_port(&state.config.imap.listen_addr),
+        "web_port": listen_port(&state.config.web.listen_addr),
         "dkim_selector": state.config.dkim.selector,
+        "plugins": plugins,
     })))
+}
+
+pub async fn get_plugins(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !claims.is_admin {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    Ok(Json(plugin_status(&state)))
+}
+
+fn plugin_status(state: &AppState) -> serde_json::Value {
+    let plugins_config = state.config.plugins.as_ref();
+    let enabled = plugins_config.map(|pc| pc.enabled).unwrap_or(false);
+    let configured_paths = plugins_config
+        .map(|pc| pc.paths.clone())
+        .unwrap_or_default();
+    let directory = plugins_config.and_then(|pc| pc.directory.clone());
+    let loaded = state.plugins.plugins_info();
+    let load_errors = state.plugins.load_errors();
+    let loaded_count = loaded.len();
+    let configured_count = configured_paths.len();
+
+    json!({
+        "enabled": enabled,
+        "directory": directory,
+        "configured_paths": configured_paths,
+        "loaded": loaded,
+        "load_errors": load_errors,
+        "loaded_count": loaded_count,
+        "configured_count": configured_count,
+        "abi_version": kuria_plugin::PLUGIN_ABI_VERSION,
+    })
+}
+
+fn listen_port(addr: &str) -> Option<u16> {
+    if let Ok(socket_addr) = addr.parse::<std::net::SocketAddr>() {
+        return Some(socket_addr.port());
+    }
+
+    addr.rsplit_once(':')
+        .and_then(|(_, port)| port.parse::<u16>().ok())
 }
 
 pub async fn update_settings(

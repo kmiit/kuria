@@ -1,25 +1,45 @@
 const BASE = ''
 
 async function request(path, options = {}) {
+  const { authRedirect = true, headers, ...fetchOptions } = options
   const token = localStorage.getItem('token')
   const res = await fetch(`${BASE}${path}`, {
-    ...options,
+    ...fetchOptions,
     headers: {
       'Content-Type': 'application/json',
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...options.headers,
+      ...headers,
     },
   })
   if (res.status === 401) {
     localStorage.removeItem('token')
-    window.location.href = '/login'
+    if (authRedirect) {
+      window.location.href = '/login'
+    }
     throw new Error('Unauthorized')
   }
   if (!res.ok) {
     const text = await res.text()
     throw new Error(text || `HTTP ${res.status}`)
   }
-  return res.json()
+  const text = await res.text()
+  if (!text) return {}
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`接口 ${path} 返回了非 JSON 内容，请确认后端 API 已启动并且路由已生效`)
+  }
+}
+
+function withQuery(path, params) {
+  const query = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value !== undefined && value !== null && value !== '') {
+      query.set(key, value)
+    }
+  })
+  const search = query.toString()
+  return search ? `${path}?${search}` : path
 }
 
 export const api = {
@@ -27,14 +47,15 @@ export const api = {
   login: (email, password) =>
     request('/api/auth/login', {
       method: 'POST',
+      authRedirect: false,
       body: JSON.stringify({ email, password }),
     }),
 
   // Emails
-  getEmails: (mailbox = 'INBOX', page = 1) =>
-    request(`/api/emails?mailbox=${mailbox}&page=${page}`),
-  searchEmails: (query, page = 1) =>
-    request(`/api/emails?search=${encodeURIComponent(query)}&page=${page}`),
+  getEmails: (mailbox = 'INBOX', page = 1, perPage = 50) =>
+    request(withQuery('/api/emails', { mailbox, page, per_page: perPage })),
+  searchEmails: (query, page = 1, perPage = 50) =>
+    request(withQuery('/api/emails', { search: query, page, per_page: perPage })),
   getEmail: (id) => request(`/api/emails/${id}`),
   deleteEmail: (id) => request(`/api/emails/${id}`, { method: 'DELETE' }),
   markRead: (id) => request(`/api/emails/${id}/read`, { method: 'PUT' }),
@@ -61,6 +82,7 @@ export const api = {
       body: JSON.stringify({ domain_name }),
     }),
   deleteDomain: (id) => request(`/api/domains/${id}`, { method: 'DELETE' }),
+  generateDkim: (id) => request(`/api/domains/${id}/dkim`, { method: 'POST' }),
 
   // Users
   getUsers: () => request('/api/users'),

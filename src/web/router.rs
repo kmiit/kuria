@@ -1,6 +1,8 @@
-use axum::Router;
+use axum::http::StatusCode;
 use axum::response::Html;
-use axum::routing::{delete, get, post, put};
+use axum::routing::{any, delete, get, post, put};
+use axum::{Json, Router};
+use serde_json::json;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
@@ -9,11 +11,13 @@ use tower_http::trace::TraceLayer;
 use super::handlers::*;
 use super::middleware::auth_middleware;
 use crate::config::Config;
+use crate::plugin::PluginManager;
 
 #[derive(Clone)]
 pub struct AppState {
     pub config: Arc<Config>,
     pub db: sqlx::SqlitePool,
+    pub plugins: Arc<PluginManager>,
 }
 
 async fn spa_index() -> Html<String> {
@@ -35,15 +39,33 @@ async fn spa_index() -> Html<String> {
     Html(html)
 }
 
-pub fn create_router(config: Arc<Config>, db: sqlx::SqlitePool) -> Router {
-    let state = AppState { config, db };
+async fn api_not_found() -> (StatusCode, Json<serde_json::Value>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(json!({
+            "error": "API route not found",
+        })),
+    )
+}
+
+pub fn create_router(
+    config: Arc<Config>,
+    db: sqlx::SqlitePool,
+    plugins: Arc<PluginManager>,
+) -> Router {
+    let state = AppState {
+        config,
+        db,
+        plugins,
+    };
 
     // Public routes (no auth required)
     let public_routes = Router::new()
         .route("/api/auth/login", post(auth::login))
         .route("/api/health", get(|| async { "OK" }))
         .route("/api/setup/status", get(settings::check_setup))
-        .route("/api/setup", post(settings::run_setup));
+        .route("/api/setup", post(settings::run_setup))
+        .route("/api/{*path}", any(api_not_found));
 
     // Protected routes (auth required)
     let protected_routes = Router::new()
@@ -69,6 +91,7 @@ pub fn create_router(config: Arc<Config>, db: sqlx::SqlitePool) -> Router {
         .route("/api/settings", get(settings::get_settings))
         .route("/api/settings", put(settings::update_settings))
         .route("/api/settings/password", post(settings::change_password))
+        .route("/api/plugins", get(settings::get_plugins))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             auth_middleware,
@@ -80,7 +103,49 @@ pub fn create_router(config: Arc<Config>, db: sqlx::SqlitePool) -> Router {
         .merge(protected_routes)
         .nest_service("/assets", ServeDir::new("static/dist/assets"))
         .fallback(spa_index)
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            plugin_middleware,
+        ))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)
+}
+
+/// Plugin middleware: calls on_web_request for every HTTP request.
+async fn plugin_middleware(
+    axum::extract::State(state): axum::extract::State<AppState>,
+    request: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> Result<axum::response::Response, StatusCode> {
+    let method = request.method().to_string();
+    let path = request.uri().path().to_string();
+    let query = request.uri().query().unwrap_or("").to_string();
+
+    // Collect headers into a JSON object
+    let headers_map: serde_json::Map<String, serde_json::Value> = request
+        .headers()
+        .iter()
+        .filter_map(|(k, v)| {
+            v.to_str()
+                .ok()
+                .map(|v| (k.to_string(), serde_json::Value::String(v.to_string())))
+        })
+        .collect();
+    let headers_json = serde_json::to_string(&headers_map).unwrap_or_default();
+
+    if let Some(result) = state
+        .plugins
+        .call_web_request(&method, &path, &headers_json, &query)
+    {
+        if result.reject {
+            let msg = result
+                .reject_message
+                .unwrap_or_else(|| "Request rejected by plugin".to_string());
+            tracing::warn!("Plugin rejected request: {} {} - {}", method, path, msg);
+            return Err(StatusCode::FORBIDDEN);
+        }
+    }
+
+    Ok(next.run(request).await)
 }

@@ -10,10 +10,18 @@ const route = useRoute()
 const email = ref(null)
 const attachments = ref([])
 const loading = ref(true)
+const error = ref('')
+const actionMessage = ref('')
 const showHtml = ref(false)
 const moveTarget = ref('')
 
-const mailboxes = ['INBOX', 'Sent', 'Drafts', 'Trash', 'Spam']
+const mailboxes = [
+  { id: 'INBOX', name: '收件箱' },
+  { id: 'Sent', name: '已发送' },
+  { id: 'Drafts', name: '草稿' },
+  { id: 'Trash', name: '垃圾箱' },
+  { id: 'Spam', name: '垃圾邮件' },
+]
 
 const displayRecipients = computed(() => {
   if (!email.value) return ''
@@ -24,6 +32,23 @@ const displayRecipients = computed(() => {
     return email.value.recipients
   }
 })
+
+const authResults = computed(() => {
+  if (!email.value) return []
+  return [
+    { label: 'SPF', value: email.value.spf_result },
+    { label: 'DKIM', value: email.value.dkim_signature ? 'pass' : '' },
+    { label: 'DMARC', value: email.value.dmarc_result },
+  ].filter((item) => item.value)
+})
+
+function mailboxName(id) {
+  return mailboxes.find((m) => m.id === id)?.name || id || '收件箱'
+}
+
+function backToMailbox(mailbox = email.value?.mailbox || route.query.mailbox || 'INBOX') {
+  router.push({ path: '/inbox', query: { mailbox } })
+}
 
 function formatDate(dateStr) {
   if (!dateStr) return ''
@@ -46,14 +71,15 @@ function formatSize(bytes) {
 
 async function loadEmail() {
   loading.value = true
+  error.value = ''
+  actionMessage.value = ''
   try {
     const data = await api.getEmail(route.params.id)
     email.value = data.email
     attachments.value = data.attachments || []
-    // Default to HTML view if available
     showHtml.value = !!data.email.body_html
   } catch (e) {
-    console.error(e)
+    error.value = e.message || '加载邮件失败'
   } finally {
     loading.value = false
   }
@@ -63,25 +89,34 @@ async function handleDelete() {
   if (!confirm('确定删除这封邮件？')) return
   try {
     await api.deleteEmail(email.value.id)
-    router.push('/inbox')
+    backToMailbox()
   } catch (e) {
-    console.error(e)
+    actionMessage.value = e.message || '删除失败'
   }
 }
 
 async function handleMove(mailbox) {
+  if (!mailbox || !email.value) return
   try {
     await api.moveEmail(email.value.id, mailbox)
-    router.push('/inbox')
+    actionMessage.value = `已移动到${mailboxName(mailbox)}`
+    backToMailbox(mailbox)
   } catch (e) {
-    console.error(e)
+    actionMessage.value = e.message || '移动失败'
   }
+}
+
+function replyEmail() {
+  router.push({ path: '/compose', query: { reply: email.value?.id } })
+}
+
+function forwardEmail() {
+  router.push({ path: '/compose', query: { forward: email.value?.id } })
 }
 
 function downloadAttachment(att) {
   const token = localStorage.getItem('token')
   const url = api.getAttachmentUrl(att.id)
-  // Create a temporary link with auth header workaround
   const a = document.createElement('a')
   a.href = url + '?token=' + token
   a.download = att.filename || 'attachment'
@@ -97,23 +132,39 @@ onMounted(loadEmail)
 <template>
   <div class="email-detail">
     <div class="toolbar">
-      <MiuixButton @click="router.push('/inbox')">← 返回</MiuixButton>
+      <MiuixButton @click="backToMailbox()">← 返回</MiuixButton>
       <div class="toolbar-actions">
-        <select v-model="moveTarget" @change="handleMove(moveTarget)" class="move-select">
+        <select v-model="moveTarget" class="move-select" @change="handleMove(moveTarget)">
           <option value="" disabled>移动到...</option>
-          <option v-for="m in mailboxes" :key="m" :value="m">{{ m }}</option>
+          <option
+            v-for="m in mailboxes"
+            :key="m.id"
+            :value="m.id"
+            :disabled="m.id === email?.mailbox"
+          >
+            {{ m.name }}
+          </option>
         </select>
-        <MiuixButton @click="router.push({ path: '/compose', query: { reply: email?.id } })">↩ 回复</MiuixButton>
-        <MiuixButton @click="handleDelete">🗑️ 删除</MiuixButton>
+        <MiuixButton :disabled="!email" @click="replyEmail">回复</MiuixButton>
+        <MiuixButton :disabled="!email" @click="forwardEmail">转发</MiuixButton>
+        <MiuixButton :disabled="!email" @click="handleDelete">删除</MiuixButton>
       </div>
     </div>
 
+    <div v-if="error" class="notice error">{{ error }}</div>
+    <div v-if="actionMessage" class="notice">{{ actionMessage }}</div>
     <div v-if="loading" class="loading">加载中...</div>
 
     <template v-else-if="email">
       <MiuixCard>
         <div class="card-inner">
-          <h1 class="subject">{{ email.subject || '(无主题)' }}</h1>
+          <div class="subject-row">
+            <div>
+              <h1 class="subject">{{ email.subject || '(无主题)' }}</h1>
+              <p class="mailbox-line">{{ mailboxName(email.mailbox) }} · {{ formatDate(email.created_at) }}</p>
+            </div>
+            <span v-if="!email.is_read" class="unread-pill">未读</span>
+          </div>
 
           <div class="meta">
             <div class="meta-row">
@@ -125,17 +176,18 @@ onMounted(loadEmail)
             </div>
             <div class="meta-row">
               <span class="meta-label">收件人</span>
-              <span class="meta-value">{{ displayRecipients }}</span>
+              <span class="meta-value recipients">{{ displayRecipients }}</span>
             </div>
-            <div class="meta-row">
-              <span class="meta-label">时间</span>
-              <span class="meta-value">{{ formatDate(email.created_at) }}</span>
-            </div>
-            <div v-if="email.spf_result" class="meta-row">
+            <div v-if="authResults.length" class="meta-row">
               <span class="meta-label">认证</span>
-              <span class="meta-value">
-                <span class="auth-badge" :class="{ pass: email.spf_result === 'pass' }">
-                  SPF: {{ email.spf_result }}
+              <span class="meta-value auth-list">
+                <span
+                  v-for="item in authResults"
+                  :key="item.label"
+                  class="auth-badge"
+                  :class="{ pass: item.value === 'pass' }"
+                >
+                  {{ item.label }}: {{ item.value }}
                 </span>
               </span>
             </div>
@@ -143,46 +195,48 @@ onMounted(loadEmail)
         </div>
       </MiuixCard>
 
-      <!-- Attachments -->
       <MiuixCard v-if="attachments.length > 0">
         <div class="card-inner">
-          <h3 class="section-title">📎 附件 ({{ attachments.length }})</h3>
+          <h3 class="section-title">附件 ({{ attachments.length }})</h3>
           <div class="attachment-list">
-            <div
+            <button
               v-for="att in attachments"
               :key="att.id"
               class="attachment-item"
+              type="button"
               @click="downloadAttachment(att)"
             >
               <span class="att-icon">📄</span>
-              <div class="att-info">
+              <span class="att-info">
                 <span class="att-name">{{ att.filename || '未命名附件' }}</span>
                 <span class="att-size">{{ formatSize(att.size) }}</span>
-              </div>
-              <span class="att-download">⬇</span>
-            </div>
+              </span>
+              <span class="att-download">下载</span>
+            </button>
           </div>
         </div>
       </MiuixCard>
 
-      <!-- Email Body -->
       <MiuixCard>
         <div class="card-inner">
-          <div class="body-toggle" v-if="email.body_html && email.body_text">
-            <MiuixButton
-              :class="{ active: !showHtml }"
-              @click="showHtml = false"
-            >纯文本</MiuixButton>
-            <MiuixButton
-              :class="{ active: showHtml }"
-              @click="showHtml = true"
-            >HTML</MiuixButton>
+          <div class="body-header">
+            <h3 class="section-title">正文</h3>
+            <div class="body-toggle" v-if="email.body_html && email.body_text">
+              <MiuixButton
+                :class="{ active: !showHtml }"
+                @click="showHtml = false"
+              >纯文本</MiuixButton>
+              <MiuixButton
+                :class="{ active: showHtml }"
+                @click="showHtml = true"
+              >HTML</MiuixButton>
+            </div>
           </div>
 
           <div v-if="showHtml && email.body_html" class="html-body">
             <iframe
               :srcdoc="email.body_html"
-              sandbox="allow-same-origin"
+              sandbox=""
               class="html-frame"
             ></iframe>
           </div>
@@ -197,48 +251,81 @@ onMounted(loadEmail)
 
 <style scoped>
 .email-detail {
-  max-width: 900px;
+  max-width: 920px;
 }
 
 .toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 20px;
+  gap: 12px;
+  margin-bottom: 18px;
 }
 
 .toolbar-actions {
   display: flex;
   gap: 8px;
   align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
 
 .move-select {
-  padding: 8px 12px;
-  border: 1px solid var(--m-color-border, #ddd);
-  border-radius: 8px;
-  font-size: 13px;
+  min-height: 36px;
+  padding: 0 12px;
   background: var(--m-color-card);
   color: var(--m-color-text);
   cursor: pointer;
 }
 
+.notice,
 .loading {
-  text-align: center;
-  padding: 60px 20px;
+  padding: 14px;
+  border-radius: var(--app-radius);
+  margin-bottom: 14px;
+  background: var(--m-color-card);
   color: var(--m-color-text-secondary);
+}
+
+.notice.error {
+  color: var(--app-danger);
+  border: 1px solid color-mix(in srgb, var(--app-danger) 32%, transparent);
 }
 
 .card-inner {
   padding: 24px;
 }
 
-.subject {
-  font-size: 22px;
-  font-weight: 600;
-  color: var(--m-color-text);
+.subject-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   margin-bottom: 20px;
+}
+
+.subject {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--m-color-text);
   line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+
+.mailbox-line {
+  margin-top: 6px;
+  color: var(--m-color-text-secondary);
+  font-size: 13px;
+}
+
+.unread-pill {
+  flex-shrink: 0;
+  color: white;
+  background: var(--m-color-primary);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  font-weight: 700;
 }
 
 .meta {
@@ -258,7 +345,7 @@ onMounted(loadEmail)
   color: var(--m-color-text-secondary);
   min-width: 60px;
   flex-shrink: 0;
-  padding-top: 2px;
+  padding-top: 5px;
 }
 
 .meta-value {
@@ -267,11 +354,16 @@ onMounted(loadEmail)
   display: flex;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+}
+
+.recipients {
+  overflow-wrap: anywhere;
 }
 
 .sender-avatar {
-  width: 28px;
-  height: 28px;
+  width: 30px;
+  height: 30px;
   border-radius: 50%;
   background: var(--m-color-primary);
   color: white;
@@ -279,53 +371,62 @@ onMounted(loadEmail)
   align-items: center;
   justify-content: center;
   font-size: 13px;
-  font-weight: 600;
+  font-weight: 700;
   flex-shrink: 0;
+}
+
+.auth-list {
+  flex-wrap: wrap;
 }
 
 .auth-badge {
   font-size: 12px;
-  padding: 2px 8px;
-  border-radius: 4px;
-  background: #fee;
-  color: #c33;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--app-warning) 18%, transparent);
+  color: var(--app-warning);
 }
 
 .auth-badge.pass {
-  background: #efe;
-  color: #363;
+  background: color-mix(in srgb, var(--app-success) 16%, transparent);
+  color: var(--app-success);
 }
 
 .section-title {
-  font-size: 15px;
-  font-weight: 600;
+  font-size: 16px;
+  font-weight: 650;
   color: var(--m-color-text);
-  margin-bottom: 16px;
 }
 
 .attachment-list {
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-top: 14px;
 }
 
 .attachment-item {
   display: flex;
   align-items: center;
   gap: 12px;
+  width: 100%;
   padding: 12px;
   background: var(--m-color-bg);
-  border-radius: 8px;
+  border: 1px solid transparent;
+  border-radius: var(--app-radius);
   cursor: pointer;
-  transition: background 0.2s;
+  color: inherit;
+  text-align: left;
+  transition: background 0.2s, border-color 0.2s;
 }
 
 .attachment-item:hover {
   background: var(--m-color-hover);
+  border-color: var(--m-color-border);
 }
 
 .att-icon {
-  font-size: 24px;
+  font-size: 22px;
   flex-shrink: 0;
 }
 
@@ -344,23 +445,32 @@ onMounted(loadEmail)
 }
 
 .att-size {
+  display: block;
   font-size: 12px;
   color: var(--m-color-text-secondary);
 }
 
 .att-download {
-  font-size: 18px;
+  font-size: 13px;
+  color: var(--m-color-primary);
+  font-weight: 650;
   flex-shrink: 0;
+}
+
+.body-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 16px;
 }
 
 .body-toggle {
   display: flex;
   gap: 4px;
-  margin-bottom: 16px;
   padding: 4px;
   background: var(--m-color-bg);
-  border-radius: 8px;
-  width: fit-content;
+  border-radius: var(--app-radius);
 }
 
 .body-toggle .active {
@@ -370,21 +480,48 @@ onMounted(loadEmail)
 
 .html-body {
   border: 1px solid var(--m-color-border);
-  border-radius: 8px;
+  border-radius: var(--app-radius);
   overflow: hidden;
 }
 
 .html-frame {
   width: 100%;
-  min-height: 400px;
+  min-height: 480px;
   border: none;
   background: white;
 }
 
 .text-body {
   white-space: pre-wrap;
-  line-height: 1.7;
+  line-height: 1.75;
   color: var(--m-color-text);
   font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 680px) {
+  .toolbar,
+  .subject-row,
+  .body-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .toolbar-actions {
+    justify-content: flex-start;
+  }
+
+  .move-select {
+    width: 100%;
+  }
+
+  .meta-row {
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .meta-label {
+    padding-top: 0;
+  }
 }
 </style>

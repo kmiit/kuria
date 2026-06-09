@@ -9,6 +9,7 @@ const step = ref(1)
 const totalSteps = 4
 const loading = ref(false)
 const error = ref('')
+const copyMessage = ref('')
 
 // Form data
 const hostname = ref('')
@@ -24,18 +25,29 @@ const progress = computed(() => (step.value / totalSteps) * 100)
 
 function nextStep() {
   error.value = ''
+  copyMessage.value = ''
 
   if (step.value === 1) {
     // Welcome - just proceed
     step.value = 2
   } else if (step.value === 2) {
     // Validate domain settings
+    hostname.value = hostname.value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
+    domain.value = domain.value.trim().toLowerCase().replace(/^https?:\/\//, '').replace(/\/.*$/, '')
     if (!hostname.value) {
       error.value = '请输入服务器主机名'
       return
     }
     if (!domain.value) {
       error.value = '请输入域名'
+      return
+    }
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(hostname.value)) {
+      error.value = '请输入有效的服务器主机名'
+      return
+    }
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(domain.value)) {
+      error.value = '请输入有效的邮件域名'
       return
     }
     // Auto-fill email
@@ -45,7 +57,8 @@ function nextStep() {
     step.value = 3
   } else if (step.value === 3) {
     // Validate admin account
-    if (!adminEmail.value || !adminEmail.value.includes('@')) {
+    adminEmail.value = adminEmail.value.trim().toLowerCase()
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(adminEmail.value)) {
       error.value = '请输入有效的邮箱地址'
       return
     }
@@ -111,7 +124,7 @@ async function runSetup() {
 
 function copyToClipboard(text) {
   navigator.clipboard.writeText(text).then(() => {
-    alert('已复制到剪贴板')
+    copyMessage.value = '已复制到剪贴板'
   })
 }
 </script>
@@ -224,6 +237,7 @@ function copyToClipboard(text) {
           <div v-if="setupResult" class="dns-info">
             <h3>📋 DNS 记录配置</h3>
             <p class="dns-hint">请在您的域名 DNS 管理中添加以下记录：</p>
+            <p v-if="copyMessage" class="copy-message">{{ copyMessage }}</p>
 
             <div class="dns-records">
               <div class="dns-record">
@@ -300,7 +314,9 @@ function copyToClipboard(text) {
   display: flex;
   align-items: center;
   justify-content: center;
-  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  background:
+    linear-gradient(135deg, rgba(15, 118, 110, 0.92), rgba(64, 81, 59, 0.9) 52%, rgba(183, 121, 31, 0.88)),
+    var(--m-color-bg);
   padding: 20px;
 }
 
@@ -358,9 +374,9 @@ function copyToClipboard(text) {
 
 .setup-card {
   padding: 40px;
-  border-radius: 20px;
+  border-radius: var(--app-radius);
   background: var(--m-color-card);
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.15);
+  box-shadow: var(--app-shadow);
 }
 
 .step-content {
@@ -398,7 +414,7 @@ h1 {
   gap: 12px;
   padding: 12px;
   background: var(--m-color-bg);
-  border-radius: 10px;
+  border-radius: var(--app-radius);
 }
 
 .feature-icon {
@@ -437,7 +453,7 @@ h1 {
 }
 
 .error {
-  color: #e74c3c;
+  color: var(--app-danger);
   font-size: 14px;
   margin-top: 16px;
   text-align: center;
@@ -452,7 +468,7 @@ h1 {
 .dns-info {
   text-align: left;
   background: var(--m-color-bg);
-  border-radius: 12px;
+  border-radius: var(--app-radius);
   padding: 20px;
   margin-top: 24px;
 }
@@ -468,6 +484,12 @@ h1 {
   margin-bottom: 16px;
 }
 
+.copy-message {
+  color: var(--app-success);
+  font-size: 13px;
+  margin-bottom: 12px;
+}
+
 .dns-records {
   display: flex;
   flex-direction: column;
@@ -476,7 +498,7 @@ h1 {
 
 .dns-record {
   background: var(--m-color-card);
-  border-radius: 8px;
+  border-radius: var(--app-radius);
   padding: 12px;
   border: 1px solid var(--m-color-border);
 }
@@ -491,10 +513,10 @@ h1 {
 .record-type {
   font-size: 12px;
   font-weight: 600;
-  color: #4a90d9;
-  background: #e8f0fe;
+  color: var(--app-info);
+  background: color-mix(in srgb, var(--app-info) 12%, transparent);
   padding: 2px 8px;
-  border-radius: 4px;
+  border-radius: 999px;
 }
 
 .dns-record code {
@@ -503,7 +525,7 @@ h1 {
   color: var(--m-color-text);
   background: var(--m-color-bg);
   padding: 8px;
-  border-radius: 4px;
+  border-radius: var(--app-radius);
   word-break: break-all;
   font-family: 'Monaco', 'Consolas', monospace;
 }
@@ -511,7 +533,7 @@ h1 {
 .account-info {
   text-align: left;
   background: var(--m-color-bg);
-  border-radius: 12px;
+  border-radius: var(--app-radius);
   padding: 20px;
   margin-top: 16px;
 }
@@ -525,5 +547,26 @@ h1 {
   margin-bottom: 8px;
   color: var(--m-color-text);
   font-size: 14px;
+}
+
+@media (max-width: 620px) {
+  .setup-page {
+    align-items: flex-start;
+  }
+
+  .setup-card {
+    padding: 24px;
+  }
+
+  .steps {
+    gap: 12px;
+  }
+
+  .record-header,
+  .actions {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 10px;
+  }
 }
 </style>

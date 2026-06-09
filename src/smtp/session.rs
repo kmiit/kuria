@@ -5,6 +5,7 @@ use tracing::{debug, warn};
 use crate::config::Config;
 use crate::db::queries;
 use crate::mail::auth::check_spf;
+use crate::plugin::PluginManager;
 
 const MAX_MAIL_SIZE: usize = 52_428_800; // 50 MB
 
@@ -22,6 +23,7 @@ pub async fn handle_smtp_session<R, W>(
     mut writer: W,
     config: Arc<Config>,
     db: sqlx::SqlitePool,
+    plugins: Arc<PluginManager>,
     peer_addr: String,
     _is_tls: bool,
 ) -> anyhow::Result<SmtpSessionResult>
@@ -34,6 +36,18 @@ where
     // Send greeting
     let greeting = format!("220 {} ESMTP Kuria Mail Server\r\n", hostname);
     writer.write_all(greeting.as_bytes()).await?;
+
+    // Plugin: on_smtp_connect
+    if let Some(result) = plugins.call_smtp_connect(&peer_addr, _is_tls) {
+        if result.reject {
+            let msg = result
+                .reject_message
+                .unwrap_or_else(|| "Connection rejected".to_string());
+            let resp = format!("554 {}\r\n", msg);
+            writer.write_all(resp.as_bytes()).await?;
+            return Ok(SmtpSessionResult::Done);
+        }
+    }
 
     let mut sender: Option<String> = None;
     let mut recipients: Vec<String> = Vec::new();
@@ -57,6 +71,35 @@ where
             if trimmed == "." {
                 // End of data
                 in_data = false;
+
+                // Plugin: on_smtp_data
+                let mut plugin_mailbox: Option<String> = None;
+                let mut plugin_set_headers: Vec<(String, String)> = Vec::new();
+                if let Some(result) = plugins.call_smtp_data(
+                    sender.as_deref().unwrap_or(""),
+                    &recipients,
+                    &mail_data,
+                    &peer_addr,
+                ) {
+                    if result.reject {
+                        let msg = result
+                            .reject_message
+                            .unwrap_or_else(|| "Message rejected".to_string());
+                        let resp = format!("550 {}\r\n", msg);
+                        writer.write_all(resp.as_bytes()).await?;
+                        sender = None;
+                        recipients.clear();
+                        mail_data.clear();
+                        continue;
+                    }
+                    // Apply modifications
+                    if let Some(modified) = result.modified_message {
+                        mail_data = modified;
+                    }
+                    plugin_mailbox = result.mailbox;
+                    plugin_set_headers = result.set_headers;
+                }
+
                 let mail_data_str = String::from_utf8_lossy(&mail_data);
 
                 // Check message size
@@ -91,6 +134,35 @@ where
                     sender_domain, peer_addr, spf_str
                 );
 
+                // Apply plugin set_headers to raw message
+                let final_mail_data = if plugin_set_headers.is_empty() {
+                    mail_data.clone()
+                } else {
+                    let mut extra_headers = String::new();
+                    for (name, value) in &plugin_set_headers {
+                        extra_headers.push_str(name);
+                        extra_headers.push_str(": ");
+                        extra_headers.push_str(value);
+                        extra_headers.push_str("\r\n");
+                    }
+                    // Insert extra headers after the existing headers (before the blank line)
+                    let mail_str = String::from_utf8_lossy(&mail_data);
+                    if let Some(body_start) = mail_str.find("\r\n\r\n") {
+                        let mut combined = mail_data[..body_start + 2].to_vec();
+                        combined.extend_from_slice(extra_headers.as_bytes());
+                        combined.extend_from_slice(&mail_data[body_start + 2..]);
+                        combined
+                    } else {
+                        // No body separator found, prepend headers
+                        let mut combined = extra_headers.into_bytes();
+                        combined.extend_from_slice(&mail_data);
+                        combined
+                    }
+                };
+
+                // Destination mailbox (plugin override or default)
+                let dest_mailbox = plugin_mailbox.as_deref().unwrap_or("INBOX");
+
                 // Store for each local recipient
                 let mut delivered = false;
                 for rcpt in &recipients {
@@ -99,7 +171,7 @@ where
                     {
                         if let Ok(Some(user)) = queries::get_user_by_email(&db, rcpt).await {
                             // Parse with mail_parser for proper subject extraction
-                            let parsed = crate::mail::parser::parse_email(&mail_data);
+                            let parsed = crate::mail::parser::parse_email(&final_mail_data);
                             let subject = parsed
                                 .as_ref()
                                 .ok()
@@ -114,9 +186,9 @@ where
                                 subject,
                                 parsed.as_ref().ok().and_then(|p| p.body_text.as_deref()),
                                 parsed.as_ref().ok().and_then(|p| p.body_html.as_deref()),
-                                Some(&mail_data),
+                                Some(&final_mail_data),
                                 user.id,
-                                "INBOX",
+                                dest_mailbox,
                             )
                             .await;
 
@@ -368,11 +440,39 @@ where
             }
         } else if upper.starts_with("MAIL FROM:") {
             let addr = extract_address(trimmed);
+            // Plugin: on_smtp_from
+            if let Some(ref s) = addr {
+                if let Some(result) = plugins.call_smtp_from(s, &peer_addr) {
+                    if result.reject {
+                        let msg = result
+                            .reject_message
+                            .unwrap_or_else(|| "Sender rejected".to_string());
+                        let resp = format!("550 {}\r\n", msg);
+                        writer.write_all(resp.as_bytes()).await?;
+                        continue;
+                    }
+                }
+            }
             sender = addr;
             let resp = "250 OK\r\n";
             writer.write_all(resp.as_bytes()).await?;
         } else if upper.starts_with("RCPT TO:") {
             let addr = extract_address(trimmed);
+            // Plugin: on_smtp_to
+            if let Some(ref rcpt) = addr {
+                if let Some(result) =
+                    plugins.call_smtp_to(rcpt, sender.as_deref().unwrap_or(""), &peer_addr)
+                {
+                    if result.reject {
+                        let msg = result
+                            .reject_message
+                            .unwrap_or_else(|| "Recipient rejected".to_string());
+                        let resp = format!("550 {}\r\n", msg);
+                        writer.write_all(resp.as_bytes()).await?;
+                        continue;
+                    }
+                }
+            }
             if let Some(addr) = addr {
                 recipients.push(addr);
             }
