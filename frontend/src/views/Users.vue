@@ -2,6 +2,7 @@
 import { ref, onMounted, computed } from 'vue'
 import { MiuixButton, MiuixInput, MiuixCard, MiuixDialog, MiuixSwitch } from 'miuix-vue'
 import { api } from '../api'
+import PasswordInput from '../components/PasswordInput.vue'
 
 const users = ref([])
 const domains = ref([])
@@ -203,7 +204,11 @@ onMounted(loadData)
         <div class="form-group">
           <label>密码</label>
           <div class="password-row">
-            <MiuixInput v-model="newUser.password" type="password" placeholder="至少 6 个字符" />
+            <PasswordInput
+              v-model="newUser.password"
+              placeholder="至少 6 个字符"
+              autocomplete="new-password"
+            />
             <MiuixButton @click="generatePassword">生成</MiuixButton>
           </div>
         </div>

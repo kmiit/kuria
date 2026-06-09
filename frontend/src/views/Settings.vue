@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { MiuixButton, MiuixCard, MiuixInput } from 'miuix-vue'
 import { api } from '../api'
+import PasswordInput from '../components/PasswordInput.vue'
 
 const settings = ref(null)
 const plugins = ref(null)
@@ -255,22 +256,26 @@ onMounted(loadSettings)
             <div class="password-form">
               <label class="form-group">
                 <span>当前密码</span>
-                <MiuixInput v-model="oldPassword" type="password" placeholder="输入当前密码" />
+                <PasswordInput v-model="oldPassword" placeholder="输入当前密码" />
               </label>
               <label class="form-group">
                 <span>新密码</span>
-                <MiuixInput v-model="newPassword" type="password" placeholder="至少 6 个字符" />
+                <PasswordInput
+                  v-model="newPassword"
+                  placeholder="至少 6 个字符"
+                  autocomplete="new-password"
+                />
                 <small class="strength" :class="passwordStrength.className">
                   强度：{{ passwordStrength.label }}
                 </small>
               </label>
               <label class="form-group">
                 <span>确认新密码</span>
-                <MiuixInput
+                <PasswordInput
                   v-model="confirmPassword"
-                  type="password"
                   placeholder="再次输入新密码"
-                  @keyup.enter="handleChangePassword"
+                  autocomplete="new-password"
+                  @keyup-enter="handleChangePassword"
                 />
               </label>
 

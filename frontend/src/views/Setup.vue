@@ -4,6 +4,7 @@ import { useRouter } from 'vue-router'
 import { MiuixButton, MiuixCard, MiuixInput } from 'miuix-vue'
 import { api } from '../api'
 import { setInitialized } from '../setupState'
+import PasswordInput from '../components/PasswordInput.vue'
 
 const router = useRouter()
 
@@ -493,7 +494,11 @@ function copyAllRecords() {
 
             <label class="field">
               <span>密码</span>
-              <MiuixInput v-model="form.adminPassword" type="password" placeholder="至少 6 个字符" />
+              <PasswordInput
+                v-model="form.adminPassword"
+                placeholder="至少 6 个字符"
+                autocomplete="new-password"
+              />
               <small class="strength" :class="passwordStrength.className">
                 强度：{{ passwordStrength.label }}
               </small>
@@ -501,11 +506,11 @@ function copyAllRecords() {
 
             <label class="field">
               <span>确认密码</span>
-              <MiuixInput
+              <PasswordInput
                 v-model="form.confirmPassword"
-                type="password"
                 placeholder="再次输入密码"
-                @keyup.enter="nextStep"
+                autocomplete="new-password"
+                @keyup-enter="nextStep"
               />
             </label>
           </div>

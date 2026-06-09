@@ -3,6 +3,7 @@ import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { MiuixButton, MiuixInput } from 'miuix-vue'
 import { api } from '../api'
+import PasswordInput from '../components/PasswordInput.vue'
 
 const router = useRouter()
 const email = ref('')
@@ -48,7 +49,7 @@ async function handleLogin() {
 
       <div class="form">
         <MiuixInput v-model="email" placeholder="邮箱地址" @keyup.enter="handleLogin" />
-        <MiuixInput v-model="password" type="password" placeholder="密码" @keyup.enter="handleLogin" />
+        <PasswordInput v-model="password" placeholder="密码" @keyup-enter="handleLogin" />
 
         <p v-if="error" class="error">{{ error }}</p>
 
