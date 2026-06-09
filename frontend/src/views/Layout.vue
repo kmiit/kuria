@@ -17,19 +17,11 @@ const user = computed(() => {
 
 const navItems = [
   { path: '/', name: '仪表盘', icon: '📊' },
-  { path: '/inbox', name: '收件箱', icon: '📥' },
+  { path: '/inbox', name: '邮箱', icon: '📬' },
   { path: '/compose', name: '写邮件', icon: '✏️' },
   { path: '/domains', name: '域名', icon: '🌐', admin: true },
   { path: '/users', name: '用户', icon: '👥', admin: true },
   { path: '/settings', name: '设置', icon: '⚙️', admin: true },
-]
-
-const mailboxList = [
-  { id: 'INBOX', name: '收件箱', icon: '📥' },
-  { id: 'Sent', name: '已发送', icon: '📤' },
-  { id: 'Drafts', name: '草稿', icon: '📝' },
-  { id: 'Trash', name: '垃圾箱', icon: '🗑️' },
-  { id: 'Spam', name: '垃圾邮件', icon: '⚠️' },
 ]
 
 const themeOptions = [
@@ -129,10 +121,6 @@ function logout() {
   router.push('/login')
 }
 
-function goToMailbox(id) {
-  router.push({ path: '/inbox', query: { mailbox: id } })
-}
-
 function isNavActive(item) {
   if (item.path === '/') return route.path === '/'
   if (item.path === '/inbox') return route.path === '/inbox' || route.path.startsWith('/email/')
@@ -179,27 +167,6 @@ function isNavActive(item) {
           <span v-if="item.path === '/inbox' && totalUnread" class="nav-badge">{{ totalUnread }}</span>
         </router-link>
       </nav>
-
-      <!-- Mailbox folders -->
-      <div class="mailboxes">
-        <div class="mailbox-title">邮箱文件夹</div>
-        <div
-          v-for="mb in mailboxList"
-          :key="mb.id"
-          class="mailbox-item"
-          :class="{ active: route.query.mailbox === mb.id || (!route.query.mailbox && mb.id === 'INBOX' && route.path === '/inbox') }"
-          @click="goToMailbox(mb.id)"
-        >
-          <span class="mailbox-icon">{{ mb.icon }}</span>
-          <span class="mailbox-name">{{ mb.name }}</span>
-          <span v-if="mailboxCounts[mb.id]?.total" class="mailbox-total">
-            {{ mailboxCounts[mb.id].total }}
-          </span>
-          <span v-if="mailboxCounts[mb.id]?.unread" class="mailbox-badge">
-            {{ mailboxCounts[mb.id].unread }}
-          </span>
-        </div>
-      </div>
 
       <div class="sidebar-footer">
         <div class="user-info">
@@ -351,73 +318,6 @@ function isNavActive(item) {
   background: var(--app-danger);
   color: white;
   padding: 4px 7px;
-}
-
-.mailboxes {
-  padding: 8px;
-  border-top: 1px solid var(--m-color-border);
-}
-
-.mailbox-title {
-  font-size: 11px;
-  font-weight: 600;
-  color: var(--m-color-text-secondary);
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  padding: 8px 16px 4px;
-}
-
-.mailbox-item {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 8px 16px;
-  border-radius: 8px;
-  cursor: pointer;
-  font-size: 13px;
-  color: var(--m-color-text-secondary);
-  transition: all 0.2s;
-}
-
-.mailbox-item:hover {
-  background: var(--m-color-hover);
-  color: var(--m-color-text);
-}
-
-.mailbox-item.active {
-  background: var(--m-color-primary);
-  color: white;
-}
-
-.mailbox-icon {
-  font-size: 16px;
-  width: 20px;
-  text-align: center;
-}
-
-.mailbox-name {
-  flex: 1;
-  min-width: 0;
-}
-
-.mailbox-total {
-  font-size: 11px;
-  color: var(--m-color-text-secondary);
-}
-
-.mailbox-badge {
-  font-size: 11px;
-  font-weight: 600;
-  background: #e74c3c;
-  color: white;
-  padding: 1px 6px;
-  border-radius: 10px;
-  min-width: 18px;
-  text-align: center;
-}
-
-.mailbox-item.active .mailbox-badge {
-  background: rgba(255, 255, 255, 0.3);
 }
 
 .sidebar-footer {

@@ -192,13 +192,13 @@ onMounted(() => {
 })
 
 watch(() => route.query.mailbox, (mb) => {
-  if (mb && mb !== currentMailbox.value) {
-    currentMailbox.value = mb
-    searchInput.value = ''
-    searchQuery.value = ''
-    page.value = 1
-    loadEmails()
-  }
+  const nextMailbox = mb || 'INBOX'
+  if (nextMailbox === currentMailbox.value) return
+  currentMailbox.value = nextMailbox
+  searchInput.value = ''
+  searchQuery.value = ''
+  page.value = 1
+  loadEmails()
 })
 </script>
 
