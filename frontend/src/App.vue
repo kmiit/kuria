@@ -55,6 +55,41 @@ button {
   min-height: 36px;
 }
 
+.app-secondary-button.m-button,
+.app-danger-button.m-button {
+  border: 1px solid var(--m-color-outline);
+  box-shadow: 0 1px 0 rgba(18, 32, 46, 0.04);
+}
+
+.app-secondary-button.m-button {
+  background: var(--m-color-surface-container);
+  color: var(--m-color-on-surface);
+}
+
+.app-secondary-button.m-button:not(.m-button--disabled):hover {
+  border-color: color-mix(in srgb, var(--m-color-primary) 42%, var(--m-color-outline));
+  background: color-mix(in srgb, var(--m-color-primary) 7%, var(--m-color-surface-container));
+}
+
+.app-danger-button.m-button {
+  background: color-mix(in srgb, var(--app-danger) 10%, var(--m-color-surface-container));
+  color: var(--app-danger);
+  border-color: color-mix(in srgb, var(--app-danger) 35%, var(--m-color-outline));
+}
+
+.app-danger-button.m-button:not(.m-button--disabled):hover {
+  background: color-mix(in srgb, var(--app-danger) 16%, var(--m-color-surface-container));
+  border-color: color-mix(in srgb, var(--app-danger) 56%, var(--m-color-outline));
+}
+
+.app-secondary-button.m-button.m-button--disabled,
+.app-danger-button.m-button.m-button--disabled {
+  background: var(--m-color-disabled-secondary-variant);
+  color: var(--m-color-disabled-on-secondary-variant);
+  border-color: var(--m-color-outline);
+  box-shadow: none;
+}
+
 a {
   color: inherit;
 }

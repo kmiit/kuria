@@ -17,6 +17,7 @@ const manualServerIps = ref({
   ipv4: '',
   ipv6: '',
 })
+const savingPublicIps = ref(false)
 
 const normalizedDomain = computed(() => normalizeDomain(newDomain.value))
 
@@ -91,8 +92,37 @@ function manualIpInvalid(version) {
   return version === 'ipv4' ? !isValidIpv4(value) : !isValidIpv6(value)
 }
 
+function applyManualPublicIps(data) {
+  manualServerIps.value = {
+    ipv4: data?.manual_public_ips?.ipv4 || '',
+    ipv6: data?.manual_public_ips?.ipv6 || '',
+  }
+}
+
 function effectiveServerIp(version) {
   return manualServerIp(version) || publicDetectedIp(version)
+}
+
+function addressRecordLines(domain) {
+  const mxHost = mailHost(domain)
+  return [
+    effectiveServerIp('ipv4') ? { type: 'A', value: zoneLine(domain, mxHost, 'A', effectiveServerIp('ipv4')) } : null,
+    effectiveServerIp('ipv6') ? { type: 'AAAA', value: zoneLine(domain, mxHost, 'AAAA', effectiveServerIp('ipv6')) } : null,
+  ].filter(Boolean)
+}
+
+function rowActionsLabel(record, domain) {
+  if (record.type === 'A/AAAA') {
+    return savingPublicIps.value ? '保存中...' : '保存'
+  }
+  if (record.type === 'DKIM') {
+    return generatingId.value === domain.id
+      ? '生成中...'
+      : domain.dkim_public_key
+        ? '重新生成'
+        : '生成 DKIM'
+  }
+  return ''
 }
 
 function relativeHost(host, domainName) {
@@ -242,6 +272,14 @@ function dnsRecords(domain) {
   ]
 }
 
+function recordStatusCounts(domain) {
+  const records = dnsRecords(domain)
+  return {
+    ready: records.filter((record) => record.ready).length,
+    total: records.length,
+  }
+}
+
 function cloudflareZoneFile(domain) {
   const records = dnsRecords(domain)
   const mxHost = mailHost(domain)
@@ -300,10 +338,36 @@ async function loadDomains() {
     const [domainsData, settingsData] = await Promise.all([api.getDomains(), api.getSettings()])
     domains.value = domainsData.domains || []
     settings.value = settingsData
+    applyManualPublicIps(settingsData)
   } catch (err) {
     error.value = err.message || '加载域名失败'
   } finally {
     loading.value = false
+  }
+}
+
+async function saveManualPublicIps() {
+  message.value = ''
+  error.value = ''
+
+  if (manualIpInvalid('ipv4') || manualIpInvalid('ipv6')) {
+    error.value = '公网 IP 格式不正确'
+    return
+  }
+
+  savingPublicIps.value = true
+  try {
+    const data = await api.updateSettings({
+      public_ipv4: normalizeIp(manualServerIps.value.ipv4),
+      public_ipv6: normalizeIp(manualServerIps.value.ipv6),
+    })
+    settings.value = { ...settings.value, ...data }
+    applyManualPublicIps(data)
+    message.value = '公网 IP 已保存'
+  } catch (err) {
+    error.value = err.message || '保存公网 IP 失败'
+  } finally {
+    savingPublicIps.value = false
   }
 }
 
@@ -397,7 +461,7 @@ onMounted(loadDomains)
         <p class="subtitle">每个域名的 SPF 和 DKIM 记录放在同一张卡片里，方便复制到 DNS。</p>
       </div>
       <div class="header-actions">
-        <MiuixButton @click="loadDomains">刷新</MiuixButton>
+        <MiuixButton class="app-secondary-button" @click="loadDomains">刷新</MiuixButton>
         <MiuixButton type="primary" @click="showAddDialog = true">添加域名</MiuixButton>
       </div>
     </div>
@@ -417,19 +481,25 @@ onMounted(loadDomains)
         <div class="card-inner">
           <div class="domain-head">
             <div class="domain-title">
-              <div class="domain-name">{{ domain.domain_name }}</div>
+              <div class="domain-name-row">
+                <div class="domain-name">{{ domain.domain_name }}</div>
+                <span class="compact-status">
+                  DNS {{ recordStatusCounts(domain).ready }}/{{ recordStatusCounts(domain).total }}
+                </span>
+              </div>
               <div class="domain-meta">创建于 {{ formatDate(domain.created_at) }}</div>
             </div>
             <div class="domain-actions">
-              <MiuixButton @click="copyAllRecords(domain)">复制全部</MiuixButton>
-              <MiuixButton :disabled="generatingId === domain.id" @click="generateDkim(domain)">
-                {{ generatingId === domain.id ? '生成中...' : domain.dkim_public_key ? '重新生成 DKIM' : '生成 DKIM' }}
+              <MiuixButton class="app-secondary-button" @click="copyAllRecords(domain)">复制</MiuixButton>
+              <MiuixButton class="app-secondary-button" @click="toggleDomainRecords(domain.id)">
+                {{ isDomainExpanded(domain.id) ? '收起' : '展开' }}
               </MiuixButton>
-              <MiuixButton @click="deleteDomain(domain.id, domain.domain_name)">删除</MiuixButton>
+              <MiuixButton class="app-danger-button" @click="deleteDomain(domain.id, domain.domain_name)">删除</MiuixButton>
             </div>
           </div>
 
-          <div class="dns-toolbar">
+          <div v-if="isDomainExpanded(domain.id)" class="dns-list">
+            <div class="dns-toolbar">
             <div class="dns-statuses">
               <span
                 v-for="record in dnsRecords(domain)"
@@ -441,33 +511,6 @@ onMounted(loadDomains)
                 {{ record.ready ? '可用' : '待处理' }}
               </span>
             </div>
-            <MiuixButton @click="toggleDomainRecords(domain.id)">
-              {{ isDomainExpanded(domain.id) ? '收起记录' : '展开记录' }}
-            </MiuixButton>
-          </div>
-
-          <div v-if="isDomainExpanded(domain.id)" class="dns-list">
-            <div class="manual-ip-panel">
-              <div>
-                <h2>服务器公网 IP</h2>
-                <p>自动探测失败时，可以手动填写；复制 Cloudflare 导入记录时会优先使用这里的值。</p>
-              </div>
-              <div class="manual-ip-grid">
-                <label class="manual-ip-field">
-                  <span>IPv4</span>
-                  <MiuixInput v-model="manualServerIps.ipv4" placeholder="公网 IPv4，可留空" />
-                  <small v-if="manualIpInvalid('ipv4')" class="field-error">IPv4 格式不正确</small>
-                  <small v-else-if="publicDetectedIp('ipv4')">已探测：{{ publicDetectedIp('ipv4') }}</small>
-                  <small v-else>未探测到公网 IPv4</small>
-                </label>
-                <label class="manual-ip-field">
-                  <span>IPv6</span>
-                  <MiuixInput v-model="manualServerIps.ipv6" placeholder="公网 IPv6，可留空" />
-                  <small v-if="manualIpInvalid('ipv6')" class="field-error">IPv6 格式不正确</small>
-                  <small v-else-if="publicDetectedIp('ipv6')">已探测：{{ publicDetectedIp('ipv6') }}</small>
-                  <small v-else>未探测到公网 IPv6</small>
-                </label>
-              </div>
             </div>
 
             <div
@@ -491,7 +534,44 @@ onMounted(loadDomains)
                 </div>
                 <div class="record-field">
                   <span>{{ record.dnsType }} 值</span>
-                  <code v-if="record.value">{{ record.value }}</code>
+                  <div v-if="record.type === 'A/AAAA'" class="address-record-box">
+                    <div class="manual-ip-grid">
+                      <label class="manual-ip-field">
+                        <span>公网 IPv4</span>
+                        <MiuixInput
+                          v-model="manualServerIps.ipv4"
+                          placeholder="可留空"
+                          @keyup.enter="saveManualPublicIps"
+                        />
+                        <small v-if="manualIpInvalid('ipv4')" class="field-error">IPv4 格式不正确</small>
+                        <small v-else-if="publicDetectedIp('ipv4')">已探测：{{ publicDetectedIp('ipv4') }}</small>
+                        <small v-else>{{ savingPublicIps ? '正在保存...' : '未探测到公网 IPv4' }}</small>
+                      </label>
+                      <label class="manual-ip-field">
+                        <span>公网 IPv6</span>
+                        <MiuixInput
+                          v-model="manualServerIps.ipv6"
+                          placeholder="可留空"
+                          @keyup.enter="saveManualPublicIps"
+                        />
+                        <small v-if="manualIpInvalid('ipv6')" class="field-error">IPv6 格式不正确</small>
+                        <small v-else-if="publicDetectedIp('ipv6')">已探测：{{ publicDetectedIp('ipv6') }}</small>
+                        <small v-else>{{ savingPublicIps ? '正在保存...' : '未探测到公网 IPv6' }}</small>
+                      </label>
+                    </div>
+                    <div v-if="addressRecordLines(domain).length" class="address-lines">
+                      <div
+                        v-for="line in addressRecordLines(domain)"
+                        :key="line.type"
+                        class="address-line"
+                      >
+                        <span>{{ line.type }}</span>
+                        <code>{{ line.value }}</code>
+                      </div>
+                    </div>
+                    <em v-else>未生成 A/AAAA 记录，请填写公网 IP</em>
+                  </div>
+                  <code v-else-if="record.value">{{ record.value }}</code>
                   <em v-else>未生成</em>
                 </div>
               </div>
@@ -501,12 +581,31 @@ onMounted(loadDomains)
                   {{ record.ready ? '可用' : '待处理' }}
                 </span>
                 <small>{{ record.detail }}</small>
-                <MiuixButton
-                  :disabled="!record.line"
-                  @click="copyToClipboard(record.line, record.copyLabel)"
-                >
-                  复制
-                </MiuixButton>
+                <div class="record-button-row">
+                  <MiuixButton
+                    v-if="record.type === 'A/AAAA'"
+                    type="primary"
+                    :disabled="savingPublicIps"
+                    @click="saveManualPublicIps"
+                  >
+                    {{ rowActionsLabel(record, domain) }}
+                  </MiuixButton>
+                  <MiuixButton
+                    v-if="record.type === 'DKIM'"
+                    type="primary"
+                    :disabled="generatingId === domain.id"
+                    @click="generateDkim(domain)"
+                  >
+                    {{ rowActionsLabel(record, domain) }}
+                  </MiuixButton>
+                  <MiuixButton
+                    class="app-secondary-button dns-copy-button"
+                    :disabled="!record.line"
+                    @click="copyToClipboard(record.line, record.copyLabel)"
+                  >
+                    复制
+                  </MiuixButton>
+                </div>
               </div>
             </div>
           </div>
@@ -521,7 +620,7 @@ onMounted(loadDomains)
         <p class="hint">系统会自动移除协议和路径，只保留域名。</p>
       </div>
       <template #footer="{ close }">
-        <MiuixButton @click="close">取消</MiuixButton>
+        <MiuixButton class="app-secondary-button" @click="close">取消</MiuixButton>
         <MiuixButton type="primary" :disabled="saving" @click="addDomain">
           {{ saving ? '添加中...' : '添加' }}
         </MiuixButton>
@@ -611,10 +710,17 @@ onMounted(loadDomains)
 }
 
 .card-inner {
-  padding: 22px;
+  padding: 14px 16px;
 }
 
 .domain-title {
+  min-width: 0;
+}
+
+.domain-name-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
   min-width: 0;
 }
 
@@ -622,7 +728,23 @@ onMounted(loadDomains)
   color: var(--m-color-text);
   font-size: 18px;
   font-weight: 750;
+  line-height: 28px;
   overflow-wrap: anywhere;
+}
+
+.compact-status {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  height: 22px;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: var(--app-success);
+  background: color-mix(in srgb, var(--app-success) 11%, transparent);
+  font-size: 12px;
+  font-weight: 750;
+  line-height: 1;
+  transform: translateY(-1px);
 }
 
 .domain-meta {
@@ -636,31 +758,10 @@ onMounted(loadDomains)
   margin-top: 12px;
 }
 
-.manual-ip-panel {
-  display: grid;
-  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.4fr);
-  gap: 16px;
-  padding: 14px;
-  border: 1px solid var(--m-color-border);
-  border-radius: var(--app-radius);
-  background: var(--m-color-bg);
-}
-
-.manual-ip-panel h2 {
-  color: var(--m-color-text);
-  font-size: 14px;
-  font-weight: 750;
-}
-
-.manual-ip-panel p,
 .manual-ip-field small {
   color: var(--m-color-text-secondary);
   font-size: 12px;
   line-height: 1.45;
-}
-
-.manual-ip-panel p {
-  margin-top: 4px;
 }
 
 .manual-ip-grid {
@@ -685,12 +786,33 @@ onMounted(loadDomains)
   color: var(--app-danger);
 }
 
+.address-record-box {
+  display: grid;
+  gap: 10px;
+  min-height: 42px;
+  padding: 10px;
+  background: var(--m-color-card);
+  border: 1px solid color-mix(in srgb, var(--m-color-border) 70%, transparent);
+  border-radius: var(--app-radius);
+}
+
+.address-lines {
+  display: grid;
+  gap: 8px;
+}
+
+.address-line {
+  display: grid;
+  grid-template-columns: 54px minmax(0, 1fr);
+  gap: 8px;
+  align-items: start;
+}
+
 .dns-toolbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 18px;
   padding: 12px 14px;
   border: 1px solid var(--m-color-border);
   border-radius: var(--app-radius);
@@ -731,7 +853,7 @@ onMounted(loadDomains)
 
 .dns-row {
   display: grid;
-  grid-template-columns: minmax(170px, 0.65fr) minmax(0, 1.7fr) 132px;
+  grid-template-columns: minmax(170px, 0.65fr) minmax(0, 1.7fr) 178px;
   gap: 16px;
   align-items: stretch;
   padding: 14px;
@@ -823,12 +945,61 @@ onMounted(loadDomains)
   font-family: inherit;
 }
 
+.record-field .address-line > span {
+  display: grid;
+  place-items: center;
+  height: 26px;
+  margin: 0;
+  padding: 0 8px;
+  border-radius: 999px;
+  color: var(--m-color-primary);
+  background: color-mix(in srgb, var(--m-color-primary) 11%, transparent);
+  font-size: 11px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.record-field .address-line code {
+  min-height: 26px;
+  padding: 5px 0;
+  background: transparent;
+  border: 0;
+}
+
 .record-actions {
   display: flex;
   flex-direction: column;
   align-items: flex-start;
   justify-content: space-between;
   gap: 10px;
+}
+
+.record-button-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.record-button-row :deep(.m-button) {
+  min-height: 32px;
+  padding: 9px 12px;
+  border-radius: var(--app-radius);
+  font-size: 14px;
+}
+
+.record-button-row :deep(.m-button.dns-copy-button) {
+  color: var(--m-color-text);
+  background: var(--m-color-card);
+  border: 1px solid var(--m-color-border);
+}
+
+.record-button-row :deep(.m-button.dns-copy-button:hover:not(:disabled)) {
+  border-color: var(--m-color-primary);
+  background: color-mix(in srgb, var(--m-color-primary) 8%, var(--m-color-card));
+}
+
+.record-button-row :deep(.m-button.dns-copy-button:disabled) {
+  opacity: 0.52;
 }
 
 .status {
@@ -869,10 +1040,6 @@ onMounted(loadDomains)
     grid-template-columns: 1fr;
   }
 
-  .manual-ip-panel {
-    grid-template-columns: 1fr;
-  }
-
   .record-actions {
     align-items: center;
     flex-direction: row;
@@ -886,6 +1053,12 @@ onMounted(loadDomains)
     flex-direction: column;
   }
 
+  .domain-name-row {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 5px;
+  }
+
   .header-actions,
   .domain-actions,
   .dns-toolbar,
@@ -895,7 +1068,6 @@ onMounted(loadDomains)
 
   .header-actions > *,
   .domain-actions > *,
-  .dns-toolbar > button,
   .record-actions > button {
     flex: 1;
   }
@@ -905,6 +1077,10 @@ onMounted(loadDomains)
   }
 
   .manual-ip-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .address-line {
     grid-template-columns: 1fr;
   }
 }

@@ -15,6 +15,9 @@ async fn configured_hostname(state: &AppState) -> anyhow::Result<String> {
     Ok(effective_hostname(&state.config, &state.db).await)
 }
 
+const PUBLIC_IPV4_SETTING_KEY: &str = "server.public_ipv4";
+const PUBLIC_IPV6_SETTING_KEY: &str = "server.public_ipv6";
+
 async fn detect_route_ip(bind_addr: &str, remote_addr: &str) -> Option<IpAddr> {
     let socket = UdpSocket::bind(bind_addr).await.ok()?;
     socket.connect(remote_addr).await.ok()?;
@@ -119,6 +122,8 @@ pub struct SetupRequest {
     pub domain: String,
     pub admin_email: String,
     pub admin_password: String,
+    pub public_ipv4: Option<String>,
+    pub public_ipv6: Option<String>,
 }
 
 fn normalize_domain(value: &str) -> String {
@@ -165,6 +170,54 @@ fn is_valid_email(value: &str) -> bool {
         && is_valid_domain(domain)
 }
 
+fn normalize_ip(value: &str) -> Option<String> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Some(String::new());
+    }
+
+    value.parse::<IpAddr>().ok().map(|ip| ip.to_string())
+}
+
+async fn manual_public_ips(state: &AppState) -> anyhow::Result<serde_json::Value> {
+    let ipv4 = queries::get_system_setting(&state.db, PUBLIC_IPV4_SETTING_KEY).await?;
+    let ipv6 = queries::get_system_setting(&state.db, PUBLIC_IPV6_SETTING_KEY).await?;
+
+    Ok(json!({
+        "ipv4": ipv4.unwrap_or_default(),
+        "ipv6": ipv6.unwrap_or_default(),
+    }))
+}
+
+async fn save_public_ip_setting(
+    state: &AppState,
+    key: &str,
+    value: &str,
+    expected_version: fn(IpAddr) -> bool,
+) -> Result<(), StatusCode> {
+    let normalized = normalize_ip(value).ok_or(StatusCode::BAD_REQUEST)?;
+    if !normalized.is_empty() {
+        let ip = normalized
+            .parse::<IpAddr>()
+            .map_err(|_| StatusCode::BAD_REQUEST)?;
+        if !expected_version(ip) {
+            return Err(StatusCode::BAD_REQUEST);
+        }
+    }
+
+    queries::set_system_setting(&state.db, key, &normalized)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+fn is_ipv4(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V4(_))
+}
+
+fn is_ipv6(ip: IpAddr) -> bool {
+    matches!(ip, IpAddr::V6(_))
+}
+
 /// Run the initial setup wizard
 pub async fn run_setup(
     State(state): State<AppState>,
@@ -200,6 +253,14 @@ pub async fn run_setup(
     queries::set_system_setting(&state.db, HOSTNAME_SETTING_KEY, &hostname)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    if let Some(public_ipv4) = payload.public_ipv4 {
+        save_public_ip_setting(&state, PUBLIC_IPV4_SETTING_KEY, &public_ipv4, is_ipv4).await?;
+    }
+
+    if let Some(public_ipv6) = payload.public_ipv6 {
+        save_public_ip_setting(&state, PUBLIC_IPV6_SETTING_KEY, &public_ipv6, is_ipv6).await?;
+    }
 
     // Create admin user
     let password_hash =
@@ -250,6 +311,7 @@ pub async fn run_setup(
             "domain_name": domain.domain_name,
         },
         "detected_ips": detected_server_ips().await,
+        "manual_public_ips": manual_public_ips(&state).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         "dns_records": {
             "mx": format!("{}  IN  MX  10  {}", domain_name, hostname),
             "spf": format!("{}  IN  TXT  \"v=spf1 mx:{} -all\"", domain_name, domain_name),
@@ -279,6 +341,7 @@ pub async fn get_settings(
         "web_port": listen_port(&state.config.web.listen_addr),
         "dkim_selector": state.config.dkim.selector,
         "detected_ips": detected_server_ips().await,
+        "manual_public_ips": manual_public_ips(&state).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         "plugins": plugins,
     })))
 }
@@ -330,6 +393,8 @@ fn listen_port(addr: &str) -> Option<u16> {
 #[derive(Deserialize)]
 pub struct UpdateSettingsRequest {
     pub hostname: Option<String>,
+    pub public_ipv4: Option<String>,
+    pub public_ipv6: Option<String>,
 }
 
 pub async fn update_settings(
@@ -352,6 +417,14 @@ pub async fn update_settings(
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     }
 
+    if let Some(public_ipv4) = payload.public_ipv4 {
+        save_public_ip_setting(&state, PUBLIC_IPV4_SETTING_KEY, &public_ipv4, is_ipv4).await?;
+    }
+
+    if let Some(public_ipv6) = payload.public_ipv6 {
+        save_public_ip_setting(&state, PUBLIC_IPV6_SETTING_KEY, &public_ipv6, is_ipv6).await?;
+    }
+
     let hostname = configured_hostname(&state)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -360,6 +433,7 @@ pub async fn update_settings(
         "ok": true,
         "message": "Settings updated",
         "hostname": hostname,
+        "manual_public_ips": manual_public_ips(&state).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
     })))
 }
 
@@ -416,5 +490,16 @@ mod tests {
         assert!(is_public_ip(IpAddr::V6(
             "2606:4700:4700::1111".parse().unwrap()
         )));
+    }
+
+    #[test]
+    fn manual_public_ip_values_are_normalized() {
+        assert_eq!(normalize_ip("  8.8.8.8  "), Some("8.8.8.8".to_string()));
+        assert_eq!(normalize_ip("  "), Some(String::new()));
+        assert_eq!(normalize_ip("bad-ip"), None);
+        assert!(is_ipv4("8.8.8.8".parse().unwrap()));
+        assert!(!is_ipv4("2606:4700:4700::1111".parse().unwrap()));
+        assert!(is_ipv6("2606:4700:4700::1111".parse().unwrap()));
+        assert!(!is_ipv6("8.8.8.8".parse().unwrap()));
     }
 }

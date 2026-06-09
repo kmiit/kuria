@@ -23,6 +23,7 @@ const manualServerIps = ref({
   ipv4: '',
   ipv6: '',
 })
+const savingPublicIps = ref(false)
 
 const form = ref({
   hostname: '',
@@ -196,6 +197,13 @@ function detectedIp(version) {
   return item?.address ? item : null
 }
 
+function applyManualPublicIps(data) {
+  manualServerIps.value = {
+    ipv4: data?.manual_public_ips?.ipv4 || manualServerIps.value.ipv4,
+    ipv6: data?.manual_public_ips?.ipv6 || manualServerIps.value.ipv6,
+  }
+}
+
 function publicDetectedIp(version) {
   const item = detectedIp(version)
   return item?.public ? item.address : ''
@@ -346,6 +354,7 @@ async function runSetup() {
     })
 
     setupResult.value = data
+    applyManualPublicIps(data)
     if (data.token) {
       localStorage.setItem('token', data.token)
       localStorage.setItem('user', JSON.stringify(data.user))
@@ -356,6 +365,33 @@ async function runSetup() {
     error.value = setupErrorMessage(err)
   } finally {
     loading.value = false
+  }
+}
+
+async function saveManualPublicIps() {
+  error.value = ''
+
+  if (manualIpInvalid('ipv4') || manualIpInvalid('ipv6')) {
+    error.value = '公网 IP 格式不正确'
+    return
+  }
+
+  savingPublicIps.value = true
+  try {
+    const data = await api.updateSettings({
+      public_ipv4: normalizeIp(manualServerIps.value.ipv4),
+      public_ipv6: normalizeIp(manualServerIps.value.ipv6),
+    })
+    setupResult.value = {
+      ...setupResult.value,
+      manual_public_ips: data.manual_public_ips,
+    }
+    applyManualPublicIps(data)
+    copiedKey.value = 'public-ips'
+  } catch (err) {
+    error.value = err.message || '保存公网 IP 失败'
+  } finally {
+    savingPublicIps.value = false
   }
 }
 
@@ -528,7 +564,7 @@ function copyAllRecords() {
                 <h3>Cloudflare DNS 导入记录</h3>
                 <p>复制全部后，可在 Cloudflare DNS 的导入 zone file 功能中粘贴。</p>
               </div>
-              <MiuixButton @click="copyAllRecords">
+              <MiuixButton class="app-secondary-button" @click="copyAllRecords">
                 {{ copiedKey === 'all' ? '已复制' : '复制全部' }}
               </MiuixButton>
             </div>
@@ -541,18 +577,31 @@ function copyAllRecords() {
               <div class="manual-ip-grid">
                 <label class="manual-ip-field">
                   <span>IPv4</span>
-                  <MiuixInput v-model="manualServerIps.ipv4" placeholder="公网 IPv4，可留空" />
+                  <MiuixInput
+                    v-model="manualServerIps.ipv4"
+                    placeholder="公网 IPv4，可留空"
+                    @keyup.enter="saveManualPublicIps"
+                  />
                   <small v-if="manualIpInvalid('ipv4')" class="field-error">IPv4 格式不正确</small>
                   <small v-else-if="publicDetectedIp('ipv4')">已探测：{{ publicDetectedIp('ipv4') }}</small>
-                  <small v-else>未探测到公网 IPv4</small>
+                  <small v-else>{{ savingPublicIps ? '正在保存...' : '未探测到公网 IPv4' }}</small>
                 </label>
                 <label class="manual-ip-field">
                   <span>IPv6</span>
-                  <MiuixInput v-model="manualServerIps.ipv6" placeholder="公网 IPv6，可留空" />
+                  <MiuixInput
+                    v-model="manualServerIps.ipv6"
+                    placeholder="公网 IPv6，可留空"
+                    @keyup.enter="saveManualPublicIps"
+                  />
                   <small v-if="manualIpInvalid('ipv6')" class="field-error">IPv6 格式不正确</small>
                   <small v-else-if="publicDetectedIp('ipv6')">已探测：{{ publicDetectedIp('ipv6') }}</small>
-                  <small v-else>未探测到公网 IPv6</small>
+                  <small v-else>{{ savingPublicIps ? '正在保存...' : '未探测到公网 IPv6' }}</small>
                 </label>
+              </div>
+              <div class="manual-ip-actions">
+                <MiuixButton type="primary" :disabled="savingPublicIps" @click="saveManualPublicIps">
+                  {{ savingPublicIps ? '保存中...' : '保存' }}
+                </MiuixButton>
               </div>
             </div>
 
@@ -565,7 +614,7 @@ function copyAllRecords() {
                   <small>{{ row.purpose }}</small>
                 </div>
                 <code>{{ row.value }}</code>
-                <MiuixButton @click="copyRecord(row)">
+                <MiuixButton class="app-secondary-button" @click="copyRecord(row)">
                   {{ copiedKey === row.key ? '已复制' : '复制' }}
                 </MiuixButton>
               </div>
@@ -576,7 +625,7 @@ function copyAllRecords() {
         <p v-if="error" class="error">{{ error }}</p>
 
         <div class="actions">
-          <MiuixButton v-if="step > 1 && step < 4" :disabled="loading" @click="prevStep">
+          <MiuixButton v-if="step > 1 && step < 4" class="app-secondary-button" :disabled="loading" @click="prevStep">
             上一步
           </MiuixButton>
           <span v-else></span>
@@ -922,6 +971,12 @@ code {
   color: var(--app-danger);
 }
 
+.manual-ip-actions {
+  display: flex;
+  justify-content: flex-end;
+  grid-column: 2;
+}
+
 .zone-preview {
   max-height: 210px;
   margin-bottom: 12px;
@@ -1043,6 +1098,10 @@ code {
   .manual-ip-panel,
   .manual-ip-grid {
     grid-template-columns: 1fr;
+  }
+
+  .manual-ip-actions {
+    grid-column: auto;
   }
 
   .dns-row {
