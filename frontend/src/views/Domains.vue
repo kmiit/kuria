@@ -4,6 +4,7 @@ import { MiuixButton, MiuixCard, MiuixDialog, MiuixInput } from 'miuix-vue'
 import { api } from '../api'
 
 const domains = ref([])
+const settings = ref(null)
 const loading = ref(true)
 const saving = ref(false)
 const generatingId = ref(null)
@@ -12,6 +13,10 @@ const showAddDialog = ref(false)
 const message = ref('')
 const error = ref('')
 const expandedDomains = ref({})
+const manualServerIps = ref({
+  ipv4: '',
+  ipv6: '',
+})
 
 const normalizedDomain = computed(() => normalizeDomain(newDomain.value))
 
@@ -28,12 +33,95 @@ function isValidDomain(value) {
   return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/.test(value)
 }
 
-function dnsLine(host, value) {
-  return value ? `${host} IN TXT "${value}"` : ''
+function trimTrailingDot(value) {
+  return String(value || '').replace(/\.$/, '')
+}
+
+function absoluteHost(value) {
+  const host = trimTrailingDot(value)
+  return host ? `${host}.` : ''
+}
+
+function mailHost(domain) {
+  const hostname = normalizeDomain(settings.value?.hostname)
+  return isValidDomain(hostname) ? hostname : `mail.${domain.domain_name}`
+}
+
+function detectedIp(version) {
+  const item = settings.value?.detected_ips?.[version]
+  return item?.address ? item : null
+}
+
+function publicDetectedIp(version) {
+  const item = detectedIp(version)
+  return item?.public ? item.address : ''
+}
+
+function normalizeIp(value) {
+  return String(value || '').trim()
+}
+
+function isValidIpv4(value) {
+  const parts = normalizeIp(value).split('.')
+  return parts.length === 4 && parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false
+    const number = Number(part)
+    return number >= 0 && number <= 255 && String(number) === String(Number(part))
+  })
+}
+
+function isValidIpv6(value) {
+  const ip = normalizeIp(value)
+  if (!ip.includes(':') || /[^0-9a-f:]/i.test(ip)) return false
+  if ((ip.match(/::/g) || []).length > 1) return false
+  const parts = ip.split(':').filter(Boolean)
+  return parts.length <= 8 && parts.every((part) => part.length <= 4)
+}
+
+function manualServerIp(version) {
+  const value = normalizeIp(manualServerIps.value[version])
+  if (!value) return ''
+  if (version === 'ipv4') return isValidIpv4(value) ? value : ''
+  return isValidIpv6(value) ? value : ''
+}
+
+function manualIpInvalid(version) {
+  const value = normalizeIp(manualServerIps.value[version])
+  if (!value) return false
+  return version === 'ipv4' ? !isValidIpv4(value) : !isValidIpv6(value)
+}
+
+function effectiveServerIp(version) {
+  return manualServerIp(version) || publicDetectedIp(version)
+}
+
+function relativeHost(host, domainName) {
+  const name = trimTrailingDot(host).toLowerCase()
+  const zone = trimTrailingDot(domainName).toLowerCase()
+  if (name === zone) return '@'
+  if (name.endsWith(`.${zone}`)) return name.slice(0, -(zone.length + 1))
+  return absoluteHost(name)
+}
+
+function escapeTxt(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+function quoteTxt(value) {
+  const chunkSize = 240
+  const chunks = []
+  for (let index = 0; index < value.length; index += chunkSize) {
+    chunks.push(value.slice(index, index + chunkSize))
+  }
+  return chunks.map((chunk) => `"${escapeTxt(chunk)}"`).join(' ')
+}
+
+function zoneLine(domain, host, type, value) {
+  return `${relativeHost(host, domain.domain_name)} 3600 IN ${type} ${value}`
 }
 
 function spfValue(domain) {
-  return domain.spf_record || ''
+  return domain.spf_record || `v=spf1 mx:${domain.domain_name} -all`
 }
 
 function dkimSelector(domain) {
@@ -48,6 +136,14 @@ function dkimValue(domain) {
   return domain.dkim_public_key ? `v=DKIM1; k=rsa; p=${domain.dkim_public_key}` : ''
 }
 
+function dmarcHost(domain) {
+  return `_dmarc.${domain.domain_name}`
+}
+
+function dmarcValue(domain) {
+  return `v=DMARC1; p=quarantine; rua=mailto:postmaster@${domain.domain_name}`
+}
+
 function publicKeyFingerprint(value) {
   if (!value) return ''
   let hash = 2166136261
@@ -60,15 +156,58 @@ function publicKeyFingerprint(value) {
 function dnsRecords(domain) {
   const spf = spfValue(domain)
   const dkim = dkimValue(domain)
+  const dmarc = dmarcValue(domain)
+  const mxHost = mailHost(domain)
+  const publicIpv4 = effectiveServerIp('ipv4')
+  const publicIpv6 = effectiveServerIp('ipv6')
+  const detectedIpv4 = detectedIp('ipv4')?.address || ''
+  const detectedIpv6 = detectedIp('ipv6')?.address || ''
+  const mailHostInThisZone = trimTrailingDot(mxHost).endsWith(`.${domain.domain_name}`)
   const fingerprint = publicKeyFingerprint(domain.dkim_public_key)
+  const addressLines = [
+    publicIpv4 ? zoneLine(domain, mxHost, 'A', publicIpv4) : '',
+    publicIpv6 ? zoneLine(domain, mxHost, 'AAAA', publicIpv6) : '',
+  ].filter(Boolean)
+  const detectedIpText = [detectedIpv4, detectedIpv6].filter(Boolean).join(' / ')
 
   return [
     {
+      type: 'A/AAAA',
+      title: '邮件主机地址',
+      dnsType: 'A 或 AAAA',
+      host: mxHost,
+      value: addressLines.length
+        ? addressLines.join('\n')
+        : detectedIpText || '未探测到可用于 DNS 的公网 IP',
+      line: addressLines.join('\n'),
+      ready: Boolean(addressLines.length),
+      note: `${mxHost} 必须能解析到这台邮件服务器。`,
+      detail: addressLines.length
+        ? '已根据公网 IP 生成，可直接导入。'
+        : mailHostInThisZone
+          ? '未探测到公网 IP，请手动添加 A/AAAA。'
+          : '邮件主机不在当前域名下，请到对应 DNS 区域配置 A/AAAA。',
+      copyLabel: '邮件主机地址记录',
+    },
+    {
+      type: 'MX',
+      title: '收信入口',
+      dnsType: 'MX',
+      host: domain.domain_name,
+      value: `10 ${absoluteHost(mxHost)}`,
+      line: zoneLine(domain, domain.domain_name, 'MX', `10 ${absoluteHost(mxHost)}`),
+      ready: true,
+      note: `把 ${domain.domain_name} 的收件服务器指向 ${mxHost}。`,
+      detail: '接收外部邮件必需。',
+      copyLabel: 'MX 记录',
+    },
+    {
       type: 'SPF',
       title: 'SPF 发信授权',
+      dnsType: 'TXT',
       host: domain.domain_name,
       value: spf,
-      line: dnsLine(domain.domain_name, spf),
+      line: zoneLine(domain, domain.domain_name, 'TXT', quoteTxt(spf)),
       ready: Boolean(spf),
       note: '告诉收件方哪些服务器可以代表这个域名发信。',
       detail: spf ? '已生成，添加到 DNS 的 TXT 记录即可。' : '缺少 SPF 记录。',
@@ -77,9 +216,10 @@ function dnsRecords(domain) {
     {
       type: 'DKIM',
       title: 'DKIM 签名公钥',
+      dnsType: 'TXT',
       host: dkimHost(domain),
       value: dkim,
-      line: dnsLine(dkimHost(domain), dkim),
+      line: dkim ? zoneLine(domain, dkimHost(domain), 'TXT', quoteTxt(dkim)) : '',
       ready: Boolean(dkim),
       note: dkim
         ? `selector ${dkimSelector(domain)}，key hash ${fingerprint}`
@@ -87,7 +227,55 @@ function dnsRecords(domain) {
       detail: dkim ? '重新生成会得到新的 selector 和公钥。' : '尚未生成。',
       copyLabel: 'DKIM 记录',
     },
+    {
+      type: 'DMARC',
+      title: 'DMARC 策略',
+      dnsType: 'TXT',
+      host: dmarcHost(domain),
+      value: dmarc,
+      line: zoneLine(domain, dmarcHost(domain), 'TXT', quoteTxt(dmarc)),
+      ready: true,
+      note: '告诉收件方 SPF/DKIM 失败时如何处理。',
+      detail: '建议先用 quarantine，确认投递稳定后再收紧。',
+      copyLabel: 'DMARC 记录',
+    },
   ]
+}
+
+function cloudflareZoneFile(domain) {
+  const records = dnsRecords(domain)
+  const mxHost = mailHost(domain)
+  const mailHostName = trimTrailingDot(mxHost)
+  const mailHostRelative = relativeHost(mailHostName, domain.domain_name)
+  const mailHostInThisZone = !mailHostRelative.endsWith('.')
+  const ipv4 = detectedIp('ipv4')
+  const ipv6 = detectedIp('ipv6')
+  const importedIpv4 = effectiveServerIp('ipv4')
+  const importedIpv6 = effectiveServerIp('ipv6')
+  const lines = [
+    `$ORIGIN ${absoluteHost(domain.domain_name)}`,
+    '$TTL 3600',
+    '; Cloudflare zone file for Kuria Mail',
+  ]
+
+  if (!mailHostInThisZone) {
+    lines.push(`; TODO: make sure ${absoluteHost(mailHostName)} has A/AAAA records in its own DNS zone.`)
+  } else if (!importedIpv4 && !importedIpv6) {
+    lines.push('; TODO before import: no public server IP was detected automatically.')
+    if (ipv4?.address) lines.push(`; Detected IPv4 ${ipv4.address} is not public, so it was not imported.`)
+    if (ipv6?.address) lines.push(`; Detected IPv6 ${ipv6.address} is not public, so it was not imported.`)
+    lines.push(`; ${mailHostRelative} 3600 IN A <server-ipv4>`)
+    lines.push(`; ${mailHostRelative} 3600 IN AAAA <server-ipv6>`)
+  }
+
+  records.forEach((record) => {
+    if (record.line) lines.push(record.line)
+    if (record.type === 'DKIM' && !record.ready) {
+      lines.push('; TODO: generate DKIM in Kuria, then import the DKIM TXT record.')
+    }
+  })
+
+  return `${lines.join('\n')}\n`
 }
 
 function isDomainExpanded(id) {
@@ -109,8 +297,9 @@ async function loadDomains() {
   loading.value = true
   error.value = ''
   try {
-    const data = await api.getDomains()
-    domains.value = data.domains || []
+    const [domainsData, settingsData] = await Promise.all([api.getDomains(), api.getSettings()])
+    domains.value = domainsData.domains || []
+    settings.value = settingsData
   } catch (err) {
     error.value = err.message || '加载域名失败'
   } finally {
@@ -189,10 +378,7 @@ async function copyToClipboard(text, label = '记录') {
 }
 
 function copyAllRecords(domain) {
-  const records = dnsRecords(domain)
-    .map((record) => record.line)
-    .filter(Boolean)
-  copyToClipboard(records.join('\n'), 'DNS 记录')
+  copyToClipboard(cloudflareZoneFile(domain), 'Cloudflare 导入记录')
 }
 
 function formatDate(dateStr) {
@@ -261,6 +447,29 @@ onMounted(loadDomains)
           </div>
 
           <div v-if="isDomainExpanded(domain.id)" class="dns-list">
+            <div class="manual-ip-panel">
+              <div>
+                <h2>服务器公网 IP</h2>
+                <p>自动探测失败时，可以手动填写；复制 Cloudflare 导入记录时会优先使用这里的值。</p>
+              </div>
+              <div class="manual-ip-grid">
+                <label class="manual-ip-field">
+                  <span>IPv4</span>
+                  <MiuixInput v-model="manualServerIps.ipv4" placeholder="公网 IPv4，可留空" />
+                  <small v-if="manualIpInvalid('ipv4')" class="field-error">IPv4 格式不正确</small>
+                  <small v-else-if="publicDetectedIp('ipv4')">已探测：{{ publicDetectedIp('ipv4') }}</small>
+                  <small v-else>未探测到公网 IPv4</small>
+                </label>
+                <label class="manual-ip-field">
+                  <span>IPv6</span>
+                  <MiuixInput v-model="manualServerIps.ipv6" placeholder="公网 IPv6，可留空" />
+                  <small v-if="manualIpInvalid('ipv6')" class="field-error">IPv6 格式不正确</small>
+                  <small v-else-if="publicDetectedIp('ipv6')">已探测：{{ publicDetectedIp('ipv6') }}</small>
+                  <small v-else>未探测到公网 IPv6</small>
+                </label>
+              </div>
+            </div>
+
             <div
               v-for="record in dnsRecords(domain)"
               :key="record.type"
@@ -281,7 +490,7 @@ onMounted(loadDomains)
                   <code>{{ record.host }}</code>
                 </div>
                 <div class="record-field">
-                  <span>TXT 值</span>
+                  <span>{{ record.dnsType }} 值</span>
                   <code v-if="record.value">{{ record.value }}</code>
                   <em v-else>未生成</em>
                 </div>
@@ -425,6 +634,55 @@ onMounted(loadDomains)
   flex-direction: column;
   gap: 12px;
   margin-top: 12px;
+}
+
+.manual-ip-panel {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.4fr);
+  gap: 16px;
+  padding: 14px;
+  border: 1px solid var(--m-color-border);
+  border-radius: var(--app-radius);
+  background: var(--m-color-bg);
+}
+
+.manual-ip-panel h2 {
+  color: var(--m-color-text);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.manual-ip-panel p,
+.manual-ip-field small {
+  color: var(--m-color-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.manual-ip-panel p {
+  margin-top: 4px;
+}
+
+.manual-ip-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.manual-ip-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.manual-ip-field span {
+  color: var(--m-color-text);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.manual-ip-field .field-error {
+  color: var(--app-danger);
 }
 
 .dns-toolbar {
@@ -611,6 +869,10 @@ onMounted(loadDomains)
     grid-template-columns: 1fr;
   }
 
+  .manual-ip-panel {
+    grid-template-columns: 1fr;
+  }
+
   .record-actions {
     align-items: center;
     flex-direction: row;
@@ -639,6 +901,10 @@ onMounted(loadDomains)
   }
 
   .record-values {
+    grid-template-columns: 1fr;
+  }
+
+  .manual-ip-grid {
     grid-template-columns: 1fr;
   }
 }

@@ -19,6 +19,10 @@ const loading = ref(false)
 const error = ref('')
 const copiedKey = ref('')
 const setupResult = ref(null)
+const manualServerIps = ref({
+  ipv4: '',
+  ipv6: '',
+})
 
 const form = ref({
   hostname: '',
@@ -47,14 +51,73 @@ const passwordStrength = computed(() => {
 })
 
 const dnsRows = computed(() => {
-  const records = setupResult.value?.dns_records
-  if (!records) return []
+  if (!setupResult.value) return []
+  const domain = setupDomain()
+  const mxHost = setupHostname()
+  const addressRecords = addressRows(domain, mxHost)
   return [
-    { key: 'mx', label: 'MX', purpose: '接收发往该域名的邮件', value: records.mx },
-    { key: 'spf', label: 'TXT / SPF', purpose: '声明允许这台服务器发信', value: records.spf },
-    { key: 'dkim', label: 'TXT / DKIM', purpose: '预留 DKIM 公钥记录', value: records.dkim },
-    { key: 'dmarc', label: 'TXT / DMARC', purpose: '定义域名认证失败策略', value: records.dmarc },
+    ...addressRecords,
+    {
+      key: 'mx',
+      label: 'MX',
+      purpose: '接收发往该域名的邮件',
+      value: zoneLine(domain, domain, 'MX', `10 ${absoluteHost(mxHost)}`),
+    },
+    {
+      key: 'spf',
+      label: 'TXT / SPF',
+      purpose: '声明允许这台服务器发信',
+      value: zoneLine(domain, domain, 'TXT', quoteTxt(`v=spf1 mx:${domain} -all`)),
+    },
+    {
+      key: 'dkim',
+      label: 'TXT / DKIM',
+      purpose: '初始化后生成 DKIM 公钥',
+      value: '; TODO: enter Domains, generate DKIM, then import the DKIM TXT record.',
+    },
+    {
+      key: 'dmarc',
+      label: 'TXT / DMARC',
+      purpose: '定义域名认证失败策略',
+      value: zoneLine(
+        domain,
+        `_dmarc.${domain}`,
+        'TXT',
+        quoteTxt(`v=DMARC1; p=quarantine; rua=mailto:postmaster@${domain}`),
+      ),
+    },
   ]
+})
+
+const cloudflareZoneFile = computed(() => {
+  if (!setupResult.value) return ''
+  const domain = setupDomain()
+  const hostname = setupHostname()
+  const hostRelative = relativeHost(hostname, domain)
+  const hostInThisZone = !hostRelative.endsWith('.')
+  const ipv4 = detectedIp('ipv4')
+  const ipv6 = detectedIp('ipv6')
+  const lines = [
+    `$ORIGIN ${absoluteHost(domain)}`,
+    '$TTL 3600',
+    '; Cloudflare zone file for Kuria Mail',
+  ]
+
+  if (!hostInThisZone) {
+    lines.push(`; TODO: make sure ${absoluteHost(hostname)} has A/AAAA records in its own DNS zone.`)
+  } else if (!effectiveServerIp('ipv4') && !effectiveServerIp('ipv6')) {
+    lines.push('; TODO before import: no public server IP was detected automatically.')
+    if (ipv4?.address) lines.push(`; Detected IPv4 ${ipv4.address} is not public, so it was not imported.`)
+    if (ipv6?.address) lines.push(`; Detected IPv6 ${ipv6.address} is not public, so it was not imported.`)
+    lines.push(`; ${hostRelative} 3600 IN A <server-ipv4>`)
+    lines.push(`; ${hostRelative} 3600 IN AAAA <server-ipv6>`)
+  }
+
+  dnsRows.value.forEach((row) => {
+    if (row.value) lines.push(row.value)
+  })
+
+  return `${lines.join('\n')}\n`
 })
 
 const normalizedPreview = computed(() => ({
@@ -84,6 +147,131 @@ function normalizeDomain(value) {
 
 function normalizeEmail(value) {
   return String(value || '').trim().toLowerCase()
+}
+
+function trimTrailingDot(value) {
+  return String(value || '').replace(/\.$/, '')
+}
+
+function absoluteHost(value) {
+  const host = trimTrailingDot(value)
+  return host ? `${host}.` : ''
+}
+
+function relativeHost(host, domainName) {
+  const name = trimTrailingDot(host).toLowerCase()
+  const zone = trimTrailingDot(domainName).toLowerCase()
+  if (name === zone) return '@'
+  if (name.endsWith(`.${zone}`)) return name.slice(0, -(zone.length + 1))
+  return absoluteHost(name)
+}
+
+function escapeTxt(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
+}
+
+function quoteTxt(value) {
+  const chunkSize = 240
+  const chunks = []
+  for (let index = 0; index < value.length; index += chunkSize) {
+    chunks.push(value.slice(index, index + chunkSize))
+  }
+  return chunks.map((chunk) => `"${escapeTxt(chunk)}"`).join(' ')
+}
+
+function zoneLine(domain, host, type, value) {
+  return `${relativeHost(host, domain)} 3600 IN ${type} ${value}`
+}
+
+function setupDomain() {
+  return normalizeDomain(setupResult.value?.domain?.domain_name || form.value.domain)
+}
+
+function setupHostname() {
+  return normalizeDomain(setupResult.value?.hostname || form.value.hostname)
+}
+
+function detectedIp(version) {
+  const item = setupResult.value?.detected_ips?.[version]
+  return item?.address ? item : null
+}
+
+function publicDetectedIp(version) {
+  const item = detectedIp(version)
+  return item?.public ? item.address : ''
+}
+
+function normalizeIp(value) {
+  return String(value || '').trim()
+}
+
+function isValidIpv4(value) {
+  const parts = normalizeIp(value).split('.')
+  return parts.length === 4 && parts.every((part) => {
+    if (!/^\d{1,3}$/.test(part)) return false
+    const number = Number(part)
+    return number >= 0 && number <= 255 && String(number) === String(Number(part))
+  })
+}
+
+function isValidIpv6(value) {
+  const ip = normalizeIp(value)
+  if (!ip.includes(':') || /[^0-9a-f:]/i.test(ip)) return false
+  if ((ip.match(/::/g) || []).length > 1) return false
+  const parts = ip.split(':').filter(Boolean)
+  return parts.length <= 8 && parts.every((part) => part.length <= 4)
+}
+
+function manualServerIp(version) {
+  const value = normalizeIp(manualServerIps.value[version])
+  if (!value) return ''
+  if (version === 'ipv4') return isValidIpv4(value) ? value : ''
+  return isValidIpv6(value) ? value : ''
+}
+
+function manualIpInvalid(version) {
+  const value = normalizeIp(manualServerIps.value[version])
+  if (!value) return false
+  return version === 'ipv4' ? !isValidIpv4(value) : !isValidIpv6(value)
+}
+
+function effectiveServerIp(version) {
+  return manualServerIp(version) || publicDetectedIp(version)
+}
+
+function addressRows(domain, hostname) {
+  const publicIpv4 = effectiveServerIp('ipv4')
+  const publicIpv6 = effectiveServerIp('ipv6')
+  const rows = []
+
+  if (publicIpv4) {
+    rows.push({
+      key: 'a',
+      label: 'A',
+      purpose: '邮件主机 IPv4',
+      value: zoneLine(domain, hostname, 'A', publicIpv4),
+    })
+  }
+
+  if (publicIpv6) {
+    rows.push({
+      key: 'aaaa',
+      label: 'AAAA',
+      purpose: '邮件主机 IPv6',
+      value: zoneLine(domain, hostname, 'AAAA', publicIpv6),
+    })
+  }
+
+  if (!rows.length) {
+    rows.push({
+      key: 'address-todo',
+      label: 'A / AAAA',
+      purpose: '邮件主机地址',
+      value: '; TODO: add A/AAAA for the mail hostname after confirming the server public IP.',
+    })
+  }
+
+  return rows
 }
 
 function clearFeedback() {
@@ -188,8 +376,7 @@ async function copyRecord(row) {
 }
 
 function copyAllRecords() {
-  const text = dnsRows.value.map((row) => row.value).join('\n')
-  navigator.clipboard.writeText(text).then(() => {
+  navigator.clipboard.writeText(cloudflareZoneFile.value).then(() => {
     copiedKey.value = 'all'
   }).catch(() => {
     error.value = '复制失败，请手动选择记录内容'
@@ -311,7 +498,7 @@ function copyAllRecords() {
           </div>
 
           <div class="notice">
-            DNS 记录会在初始化完成后生成。DKIM 记录当前会先给出占位公钥，后续可在域名管理中重新生成。
+            初始化完成后会生成 Cloudflare 可导入的 DNS 记录。DKIM 需要进入域名管理生成密钥后再补充。
           </div>
         </div>
 
@@ -337,11 +524,39 @@ function copyAllRecords() {
 
           <div v-if="dnsRows.length" class="dns-section">
             <div class="dns-head">
-              <h3>DNS 记录</h3>
+              <div>
+                <h3>Cloudflare DNS 导入记录</h3>
+                <p>复制全部后，可在 Cloudflare DNS 的导入 zone file 功能中粘贴。</p>
+              </div>
               <MiuixButton @click="copyAllRecords">
                 {{ copiedKey === 'all' ? '已复制' : '复制全部' }}
               </MiuixButton>
             </div>
+
+            <div class="manual-ip-panel">
+              <div>
+                <h4>服务器公网 IP</h4>
+                <p>自动探测失败时手动填写；Cloudflare 导入文本会优先使用这里的值。</p>
+              </div>
+              <div class="manual-ip-grid">
+                <label class="manual-ip-field">
+                  <span>IPv4</span>
+                  <MiuixInput v-model="manualServerIps.ipv4" placeholder="公网 IPv4，可留空" />
+                  <small v-if="manualIpInvalid('ipv4')" class="field-error">IPv4 格式不正确</small>
+                  <small v-else-if="publicDetectedIp('ipv4')">已探测：{{ publicDetectedIp('ipv4') }}</small>
+                  <small v-else>未探测到公网 IPv4</small>
+                </label>
+                <label class="manual-ip-field">
+                  <span>IPv6</span>
+                  <MiuixInput v-model="manualServerIps.ipv6" placeholder="公网 IPv6，可留空" />
+                  <small v-if="manualIpInvalid('ipv6')" class="field-error">IPv6 格式不正确</small>
+                  <small v-else-if="publicDetectedIp('ipv6')">已探测：{{ publicDetectedIp('ipv6') }}</small>
+                  <small v-else>未探测到公网 IPv6</small>
+                </label>
+              </div>
+            </div>
+
+            <pre class="zone-preview"><code>{{ cloudflareZoneFile }}</code></pre>
 
             <div class="dns-list">
               <div v-for="row in dnsRows" :key="row.key" class="dns-row">
@@ -651,6 +866,76 @@ code {
   font-size: 17px;
 }
 
+.dns-head p {
+  margin-top: 4px;
+  color: var(--m-color-text-secondary);
+  font-size: 12px;
+}
+
+.manual-ip-panel {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.8fr) minmax(0, 1.4fr);
+  gap: 16px;
+  margin-bottom: 12px;
+  padding: 14px;
+  border: 1px solid var(--m-color-border);
+  border-radius: var(--app-radius);
+  background: var(--m-color-bg);
+}
+
+.manual-ip-panel h4 {
+  color: var(--m-color-text);
+  font-size: 14px;
+  font-weight: 750;
+}
+
+.manual-ip-panel p,
+.manual-ip-field small {
+  color: var(--m-color-text-secondary);
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.manual-ip-panel p {
+  margin-top: 4px;
+}
+
+.manual-ip-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.manual-ip-field {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.manual-ip-field span {
+  color: var(--m-color-text);
+  font-size: 12px;
+  font-weight: 750;
+}
+
+.manual-ip-field .field-error {
+  color: var(--app-danger);
+}
+
+.zone-preview {
+  max-height: 210px;
+  margin-bottom: 12px;
+  padding: 14px;
+  overflow: auto;
+  border: 1px solid var(--m-color-border);
+  border-radius: var(--app-radius);
+  background: var(--m-color-bg);
+}
+
+.zone-preview code {
+  white-space: pre;
+}
+
 .dns-list {
   display: grid;
   gap: 10px;
@@ -754,7 +1039,9 @@ code {
   }
 
   .review-grid,
-  .completion-grid {
+  .completion-grid,
+  .manual-ip-panel,
+  .manual-ip-grid {
     grid-template-columns: 1fr;
   }
 

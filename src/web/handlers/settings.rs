@@ -2,6 +2,8 @@ use axum::http::StatusCode;
 use axum::{Extension, Json, extract::State};
 use serde::Deserialize;
 use serde_json::json;
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+use tokio::net::UdpSocket;
 
 use crate::config::{HOSTNAME_SETTING_KEY, effective_hostname};
 use crate::db::models::ChangePasswordRequest;
@@ -11,6 +13,78 @@ use crate::web::router::AppState;
 
 async fn configured_hostname(state: &AppState) -> anyhow::Result<String> {
     Ok(effective_hostname(&state.config, &state.db).await)
+}
+
+async fn detect_route_ip(bind_addr: &str, remote_addr: &str) -> Option<IpAddr> {
+    let socket = UdpSocket::bind(bind_addr).await.ok()?;
+    socket.connect(remote_addr).await.ok()?;
+    Some(socket.local_addr().ok()?.ip())
+}
+
+async fn detected_server_ips() -> serde_json::Value {
+    let (ipv4, ipv6) = tokio::join!(
+        detect_route_ip("0.0.0.0:0", "1.1.1.1:80"),
+        detect_route_ip("[::]:0", "[2606:4700:4700::1111]:80"),
+    );
+
+    json!({
+        "ipv4": ip_detection_result(ipv4),
+        "ipv6": ip_detection_result(ipv6),
+    })
+}
+
+fn ip_detection_result(ip: Option<IpAddr>) -> serde_json::Value {
+    match ip {
+        Some(ip) => json!({
+            "address": ip.to_string(),
+            "public": is_public_ip(ip),
+        }),
+        None => serde_json::Value::Null,
+    }
+}
+
+fn is_public_ip(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(ip) => is_public_ipv4(ip),
+        IpAddr::V6(ip) => is_public_ipv6(ip),
+    }
+}
+
+fn is_public_ipv4(ip: Ipv4Addr) -> bool {
+    let octets = ip.octets();
+    let is_carrier_nat = octets[0] == 100 && (64..=127).contains(&octets[1]);
+    let is_protocol_assignment = octets[0] == 192 && octets[1] == 0 && octets[2] == 0;
+    let is_benchmark = octets[0] == 198 && (18..=19).contains(&octets[1]);
+    let is_reserved = octets[0] == 0 || octets[0] >= 224;
+
+    !(ip.is_private()
+        || ip.is_loopback()
+        || ip.is_link_local()
+        || ip.is_multicast()
+        || ip.is_broadcast()
+        || ip.is_documentation()
+        || ip.is_unspecified()
+        || is_carrier_nat
+        || is_protocol_assignment
+        || is_benchmark
+        || is_reserved)
+}
+
+fn is_public_ipv6(ip: Ipv6Addr) -> bool {
+    let segments = ip.segments();
+    let first = segments[0];
+    let is_global_unicast = (first & 0xe000) == 0x2000;
+    let is_unique_local = (first & 0xfe00) == 0xfc00;
+    let is_link_local = (first & 0xffc0) == 0xfe80;
+    let is_documentation = segments[0] == 0x2001 && segments[1] == 0x0db8;
+
+    is_global_unicast
+        && !ip.is_loopback()
+        && !ip.is_unspecified()
+        && !ip.is_multicast()
+        && !is_unique_local
+        && !is_link_local
+        && !is_documentation
 }
 
 /// Check if the system has been initialized (has at least one admin user)
@@ -175,6 +249,7 @@ pub async fn run_setup(
             "id": domain.id,
             "domain_name": domain.domain_name,
         },
+        "detected_ips": detected_server_ips().await,
         "dns_records": {
             "mx": format!("{}  IN  MX  10  {}", domain_name, hostname),
             "spf": format!("{}  IN  TXT  \"v=spf1 mx:{} -all\"", domain_name, domain_name),
@@ -203,6 +278,7 @@ pub async fn get_settings(
         "imap_port": listen_port(&state.config.imap.listen_addr),
         "web_port": listen_port(&state.config.web.listen_addr),
         "dkim_selector": state.config.dkim.selector,
+        "detected_ips": detected_server_ips().await,
         "plugins": plugins,
     })))
 }
@@ -318,4 +394,27 @@ pub async fn change_password(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(json!({ "ok": true, "message": "密码已修改" })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn public_ipv4_detection_rejects_private_and_reserved_ranges() {
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(100, 64, 0, 1))));
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1))));
+        assert!(is_public_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+    }
+
+    #[test]
+    fn public_ipv6_detection_rejects_private_and_documentation_ranges() {
+        assert!(!is_public_ip(IpAddr::V6("fd00::1".parse().unwrap())));
+        assert!(!is_public_ip(IpAddr::V6("fe80::1".parse().unwrap())));
+        assert!(!is_public_ip(IpAddr::V6("2001:db8::1".parse().unwrap())));
+        assert!(is_public_ip(IpAddr::V6(
+            "2606:4700:4700::1111".parse().unwrap()
+        )));
+    }
 }
