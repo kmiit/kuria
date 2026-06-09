@@ -58,6 +58,17 @@ function listenAddrToTarget(listenAddr) {
 const apiTarget = readBackendTarget()
 console.info(`[kuria] proxy /api -> ${apiTarget}`)
 
+function isKnownDependencyWarning(level, log) {
+  if (level !== 'warn' || log?.code !== 'INVALID_ANNOTATION') return false
+
+  const source = [log.id, log.loc?.file, log.message, log.frame]
+    .filter(Boolean)
+    .join('\n')
+    .replaceAll('\\', '/')
+
+  return source.includes('node_modules/@vueuse/core/dist/index.js')
+}
+
 export default defineConfig({
   plugins: [vue()],
   server: {
@@ -73,5 +84,11 @@ export default defineConfig({
   build: {
     outDir: '../static/dist',
     emptyOutDir: true,
+    rollupOptions: {
+      onLog(level, log, handler) {
+        if (isKnownDependencyWarning(level, log)) return
+        handler(level, log)
+      },
+    },
   },
 })
