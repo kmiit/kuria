@@ -174,6 +174,14 @@ function dmarcValue(domain) {
   return `v=DMARC1; p=quarantine; rua=mailto:postmaster@${domain.domain_name}`
 }
 
+function bimiHost(domain) {
+  return `default._bimi.${domain.domain_name}`
+}
+
+function bimiValue() {
+  return 'v=BIMI1;'
+}
+
 function publicKeyFingerprint(value) {
   if (!value) return ''
   let hash = 2166136261
@@ -187,6 +195,7 @@ function dnsRecords(domain) {
   const spf = spfValue(domain)
   const dkim = dkimValue(domain)
   const dmarc = dmarcValue(domain)
+  const bimi = bimiValue()
   const mxHost = mailHost(domain)
   const publicIpv4 = effectiveServerIp('ipv4')
   const publicIpv6 = effectiveServerIp('ipv6')
@@ -268,6 +277,18 @@ function dnsRecords(domain) {
       note: '告诉收件方 SPF/DKIM 失败时如何处理。',
       detail: '建议先用 quarantine，确认投递稳定后再收紧。',
       copyLabel: 'DMARC 记录',
+    },
+    {
+      type: 'BIMI',
+      title: 'BIMI 品牌标识',
+      dnsType: 'TXT',
+      host: bimiHost(domain),
+      value: bimi,
+      line: zoneLine(domain, bimiHost(domain), 'TXT', `"${bimi}"`),
+      ready: true,
+      note: '在收件箱中显示品牌 Logo（需要商标认证）。',
+      detail: '基础 BIMI 记录，如需显示 Logo 需添加 l= 标签。',
+      copyLabel: 'BIMI 记录',
     },
   ]
 }

@@ -340,6 +340,7 @@ pub async fn run_setup(
             "spf": format!("{}  IN  TXT  \"v=spf1 mx:{} -all\"", domain_name, domain_name),
             "dkim": dkim_dns_record,
             "dmarc": format!("_dmarc.{}  IN  TXT  \"v=DMARC1; p=quarantine; rua=mailto:admin@{}\"", domain_name, domain_name),
+            "bimi": format!("default._bimi.{}  IN  TXT  \"v=BIMI1;\"", domain_name),
         }
     })))
 }
