@@ -1682,6 +1682,7 @@ dependencies = [
  "libloading",
  "mail-builder",
  "mail-parser",
+ "once_cell",
  "rand 0.10.1",
  "rand_core 0.6.4",
  "rsa",

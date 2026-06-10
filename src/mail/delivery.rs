@@ -8,6 +8,18 @@ use crate::mail::compose::{ComposedAttachment, save_composed_attachments};
 use crate::plugin::{PluginManager, mail_delivered_event_json};
 use crate::smtp::sender::{MailSender, RawComposedMessage};
 
+static QUEUE_NOTIFIER: once_cell::sync::OnceCell<tokio::sync::mpsc::UnboundedSender<()>> = once_cell::sync::OnceCell::new();
+
+pub fn set_queue_notifier(notifier: tokio::sync::mpsc::UnboundedSender<()>) {
+    let _ = QUEUE_NOTIFIER.set(notifier);
+}
+
+fn notify_queue() {
+    if let Some(notifier) = QUEUE_NOTIFIER.get() {
+        let _ = notifier.send(());
+    }
+}
+
 pub struct MailDelivery {
     config: Arc<Config>,
     db: sqlx::SqlitePool,
@@ -117,6 +129,7 @@ impl MailDelivery {
                     queued.id, message.from, recipients
                 );
             }
+            notify_queue();
         }
 
         Ok(sent_raw_message)
@@ -136,6 +149,7 @@ impl MailDelivery {
                 queued.id, from, recipients
             );
         }
+        notify_queue();
         Ok(())
     }
 

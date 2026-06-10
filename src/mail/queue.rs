@@ -1,6 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures::stream::{self, StreamExt};
 use tracing::{error, info, warn};
 
 use crate::config::Config;
@@ -10,22 +11,27 @@ use crate::smtp::sender::MailSender;
 
 const QUEUE_BATCH_SIZE: i64 = 20;
 const QUEUE_TICK_SECONDS: u64 = 30;
+const CONCURRENT_SENDS: usize = 5;
 
 pub struct OutboundQueueWorker {
     db: sqlx::SqlitePool,
     sender: MailSender,
+    notify_rx: tokio::sync::mpsc::UnboundedReceiver<()>,
 }
 
 impl OutboundQueueWorker {
-    pub fn new(config: Arc<Config>, db: sqlx::SqlitePool) -> Self {
+    pub fn new(config: Arc<Config>, db: sqlx::SqlitePool, notify_rx: tokio::sync::mpsc::UnboundedReceiver<()>) -> Self {
         let sender = MailSender::new(config, db.clone());
-        Self { db, sender }
+        Self { db, sender, notify_rx }
     }
 
-    pub async fn run(self) {
+    pub async fn run(mut self) {
         let mut interval = tokio::time::interval(Duration::from_secs(QUEUE_TICK_SECONDS));
         loop {
-            interval.tick().await;
+            tokio::select! {
+                _ = self.notify_rx.recv() => {},
+                _ = interval.tick() => {},
+            }
             if let Err(error) = self.process_due().await {
                 error!("Outbound queue worker failed: {}", error);
             }
@@ -35,9 +41,11 @@ impl OutboundQueueWorker {
     pub async fn process_due(&self) -> anyhow::Result<usize> {
         let items = queries::get_due_outbound_queue_items(&self.db, QUEUE_BATCH_SIZE).await?;
         let count = items.len();
-        for item in items {
-            self.process_item(item).await?;
-        }
+        stream::iter(items)
+            .map(|item| self.process_item(item))
+            .buffer_unordered(CONCURRENT_SENDS)
+            .collect::<Vec<_>>()
+            .await;
         Ok(count)
     }
 
@@ -151,7 +159,8 @@ mod tests {
             .await
             .expect("failed");
 
-        let worker = OutboundQueueWorker::new(Arc::new(Config::default()), db.clone());
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker = OutboundQueueWorker::new(Arc::new(Config::default()), db.clone(), rx);
         worker
             .deliver_bounce(&item, &["remote@example.net".to_string()], "network failed")
             .await
@@ -195,7 +204,8 @@ mod tests {
         .await
         .expect("queued");
 
-        let worker = OutboundQueueWorker::new(Arc::new(Config::default()), db.clone());
+        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let worker = OutboundQueueWorker::new(Arc::new(Config::default()), db.clone(), rx);
         worker
             .deliver_bounce(&item, &["remote@example.net".to_string()], "network failed")
             .await

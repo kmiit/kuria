@@ -241,6 +241,16 @@ async fn main() -> anyhow::Result<()> {
     let plugin_manager = Arc::new(plugin::PluginManager::load(&config)?);
     plugin_manager.call_init(&config);
 
+    // Outbound Queue Worker
+    let (queue_notifier, queue_rx) = tokio::sync::mpsc::unbounded_channel();
+    mail::delivery::set_queue_notifier(queue_notifier);
+    let queue_config = config.clone();
+    let queue_db = db.clone();
+    tokio::spawn(async move {
+        let worker = mail::queue::OutboundQueueWorker::new(queue_config, queue_db, queue_rx);
+        worker.run().await;
+    });
+
     // In debug mode, start the Vite dev server for frontend hot-reload.
     // The CARGO env var is set by `cargo run` but not when running the binary directly.
     let is_cargo_run = std::env::var("CARGO").is_ok();
@@ -293,13 +303,6 @@ async fn main() -> anyhow::Result<()> {
         if let Err(e) = axum::serve(web_listener, app).await {
             tracing::error!("Web server error: {}", e);
         }
-    });
-
-    let queue_config = config.clone();
-    let queue_db = db.clone();
-    tokio::spawn(async move {
-        let worker = mail::queue::OutboundQueueWorker::new(queue_config, queue_db);
-        worker.run().await;
     });
 
     tracing::info!("Kuria Mail Server started successfully");
