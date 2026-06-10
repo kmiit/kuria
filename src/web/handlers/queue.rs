@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::db::models::OutboundQueueItem;
 use crate::db::queries;
 use crate::web::middleware::Claims;
-use crate::web::router::AppState;
+use crate::web::{response, router::AppState};
 
 #[derive(Deserialize)]
 pub struct QueueParams {
@@ -93,7 +93,7 @@ pub async fn delete_queue_item(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(response::ok().1)
 }
 
 #[cfg(test)]

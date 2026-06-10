@@ -19,6 +19,17 @@ pub struct User {
     pub password_hash: String,
     pub domain_id: i64,
     pub is_admin: bool,
+    pub api_enabled: bool,
+    pub created_at: Option<NaiveDateTime>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct ApiToken {
+    pub id: i64,
+    pub user_id: i64,
+    pub token: String,
+    pub name: String,
+    pub last_used_at: Option<NaiveDateTime>,
     pub created_at: Option<NaiveDateTime>,
 }
 
@@ -124,4 +135,14 @@ pub struct SendEmailAttachmentRequest {
 pub struct ChangePasswordRequest {
     pub old_password: String,
     pub new_password: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CreateApiTokenRequest {
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UpdateUserApiAccessRequest {
+    pub api_enabled: bool,
 }

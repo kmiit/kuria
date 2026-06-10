@@ -8,7 +8,7 @@ use serde_json::json;
 use crate::db::models::CreateUserRequest;
 use crate::db::queries;
 use crate::web::middleware::Claims;
-use crate::web::router::AppState;
+use crate::web::{response, router::AppState};
 
 fn normalize_email(value: &str) -> String {
     value.trim().to_ascii_lowercase()
@@ -63,6 +63,7 @@ pub async fn list_users(
                 "email": u.email,
                 "domain_id": u.domain_id,
                 "is_admin": u.is_admin,
+                "api_enabled": u.api_enabled,
                 "created_at": u.created_at,
             })
         })
@@ -115,6 +116,7 @@ pub async fn create_user(
             "email": user.email,
             "domain_id": user.domain_id,
             "is_admin": user.is_admin,
+            "api_enabled": user.api_enabled,
         }
     })))
 }
@@ -140,7 +142,7 @@ pub async fn delete_user(
         return Err(StatusCode::NOT_FOUND);
     }
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(response::ok().1)
 }
 
 #[cfg(test)]

@@ -16,7 +16,7 @@ use crate::db::models::CreateDomainRequest;
 use crate::db::queries;
 use crate::mail::auth::generate_dkim_dns_record;
 use crate::web::middleware::Claims;
-use crate::web::router::AppState;
+use crate::web::{response, router::AppState};
 
 struct DkimKeyPair {
     private_key_pem: String,
@@ -172,7 +172,7 @@ pub async fn delete_domain(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(response::ok().1)
 }
 
 pub async fn generate_dkim(

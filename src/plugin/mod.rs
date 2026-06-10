@@ -487,6 +487,7 @@ impl PluginManager {
         None
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn call_plugin_api(
         &self,
         plugin_name: &str,

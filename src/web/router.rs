@@ -4,7 +4,6 @@ use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, delete, get, post, put};
 use axum::{Json, Router};
-use serde_json::json;
 use std::sync::Arc;
 use tower_http::cors::CorsLayer;
 use tower_http::services::ServeDir;
@@ -13,6 +12,7 @@ use tower_http::trace::TraceLayer;
 use super::handlers::*;
 use super::middleware::auth_middleware;
 use super::rate_limit::LoginRateLimiter;
+use super::response;
 use crate::config::Config;
 use crate::plugin::PluginManager;
 
@@ -44,7 +44,7 @@ async fn spa_index() -> Html<String> {
 }
 
 async fn api_not_found() -> (StatusCode, Json<serde_json::Value>) {
-    json_error_response(StatusCode::NOT_FOUND, "API route not found")
+    response::error(StatusCode::NOT_FOUND, "API route not found")
 }
 
 pub fn create_router(
@@ -91,6 +91,10 @@ pub fn create_router(
         .route("/api/drafts/{id}", get(mailbox::get_draft))
         .route("/api/drafts/{id}", delete(mailbox::delete_draft))
         .route("/api/attachments/{id}", get(mailbox::download_attachment))
+        // API Tokens
+        .route("/api/tokens", get(api_token::list_tokens))
+        .route("/api/tokens", post(api_token::create_token))
+        .route("/api/tokens/{id}", delete(api_token::delete_token))
         // Domains
         .route("/api/domains", get(domain::list_domains))
         .route("/api/domains", post(domain::create_domain))
@@ -100,6 +104,7 @@ pub fn create_router(
         .route("/api/users", get(user::list_users))
         .route("/api/users", post(user::create_user))
         .route("/api/users/{id}", delete(user::delete_user))
+        .route("/api/users/{id}/api-access", put(api_token::update_user_api_access))
         // Settings
         .route("/api/settings", get(settings::get_settings))
         .route("/api/settings", put(settings::update_settings))
@@ -135,34 +140,6 @@ pub fn create_router(
         .with_state(state)
 }
 
-fn error_message_for_status(status: StatusCode) -> &'static str {
-    match status {
-        StatusCode::BAD_REQUEST => "Bad request",
-        StatusCode::UNAUTHORIZED => "Unauthorized",
-        StatusCode::FORBIDDEN => "Forbidden",
-        StatusCode::NOT_FOUND => "Not found",
-        StatusCode::CONFLICT => "Conflict",
-        StatusCode::PAYLOAD_TOO_LARGE => "Payload too large",
-        StatusCode::TOO_MANY_REQUESTS => "Too many failed login attempts",
-        StatusCode::UNPROCESSABLE_ENTITY => "Invalid request body",
-        StatusCode::INTERNAL_SERVER_ERROR => "Internal server error",
-        _ => status.canonical_reason().unwrap_or("Request failed"),
-    }
-}
-
-fn json_error_response(
-    status: StatusCode,
-    message: impl Into<String>,
-) -> (StatusCode, Json<serde_json::Value>) {
-    (
-        status,
-        Json(json!({
-            "error": message.into(),
-            "status": status.as_u16(),
-        })),
-    )
-}
-
 async fn api_error_middleware(
     request: axum::extract::Request,
     next: axum::middleware::Next,
@@ -180,7 +157,7 @@ async fn api_error_middleware(
     let body_bytes = match to_bytes(body, 1024 * 1024).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            return json_error_response(
+            return response::error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "Failed to read response",
             )
@@ -193,8 +170,7 @@ async fn api_error_middleware(
         return Response::from_parts(parts, Body::from(body_bytes));
     }
 
-    let mut response =
-        json_error_response(status, error_message_for_status(status)).into_response();
+    let mut response = response::error_status(status).into_response();
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         header::HeaderValue::from_static("no-store"),
@@ -292,26 +268,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn status_errors_have_stable_messages() {
-        assert_eq!(
-            error_message_for_status(StatusCode::BAD_REQUEST),
-            "Bad request"
-        );
-        assert_eq!(
-            error_message_for_status(StatusCode::UNAUTHORIZED),
-            "Unauthorized"
-        );
-        assert_eq!(
-            error_message_for_status(StatusCode::INTERNAL_SERVER_ERROR),
-            "Internal server error"
-        );
-    }
-
-    #[test]
-    fn json_error_response_contains_error_and_status() {
-        let (status, Json(body)) = json_error_response(StatusCode::CONFLICT, "Domain has users");
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["error"], "Domain has users");
-        assert_eq!(body["status"], 409);
+    fn api_not_found_returns_standard_error() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (status, Json(body)) = api_not_found().await;
+            assert_eq!(status, StatusCode::NOT_FOUND);
+            assert_eq!(body["error"], "API route not found");
+            assert_eq!(body["status"], 404);
+        });
     }
 }

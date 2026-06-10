@@ -13,7 +13,7 @@ use crate::db::queries;
 use crate::mail::compose::{ComposedAttachment, save_composed_attachments};
 use crate::mail::delivery::{ComposedEmail, MailDelivery};
 use crate::web::middleware::Claims;
-use crate::web::router::AppState;
+use crate::web::{response, router::AppState};
 
 const MAX_ATTACHMENTS: usize = 10;
 const MAX_ATTACHMENT_BYTES: usize = 10 * 1024 * 1024;
@@ -449,7 +449,7 @@ pub async fn delete_email(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(response::ok().1)
 }
 
 pub async fn empty_trash(
@@ -481,7 +481,7 @@ pub async fn mark_read(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(response::ok().1)
 }
 
 pub async fn mark_unread(
@@ -502,7 +502,7 @@ pub async fn mark_unread(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(response::ok().1)
 }
 
 pub async fn move_email(
@@ -532,7 +532,7 @@ pub async fn move_email(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(response::ok().1)
 }
 
 pub async fn get_draft(
@@ -629,7 +629,7 @@ pub async fn delete_draft(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(response::ok().1)
 }
 
 pub async fn send_email(
@@ -758,7 +758,7 @@ pub async fn send_email(
         );
     }
 
-    Ok(Json(json!({ "ok": true })))
+    Ok(response::ok().1)
 }
 
 pub async fn download_attachment(
