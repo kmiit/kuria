@@ -9,7 +9,6 @@ use rand_core::OsRng;
 use rsa::RsaPrivateKey;
 use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding as Pkcs1LineEnding};
 use serde_json::json;
-use uuid::Uuid;
 
 use crate::db::models::CreateDomainRequest;
 use crate::db::queries;
