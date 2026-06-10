@@ -445,10 +445,31 @@ async function generateDkim(domain) {
 async function copyToClipboard(text, label = '记录') {
   if (!text) return
   try {
-    await navigator.clipboard.writeText(text)
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+      message.value = `${label}已复制`
+    } else {
+      fallbackCopy(text, label)
+    }
+  } catch {
+    fallbackCopy(text, label)
+  }
+}
+
+function fallbackCopy(text, label) {
+  const textarea = document.createElement('textarea')
+  textarea.value = text
+  textarea.style.position = 'fixed'
+  textarea.style.opacity = '0'
+  document.body.appendChild(textarea)
+  textarea.select()
+  try {
+    document.execCommand('copy')
     message.value = `${label}已复制`
   } catch {
     error.value = '复制失败，请手动选中记录复制'
+  } finally {
+    document.body.removeChild(textarea)
   }
 }
 
