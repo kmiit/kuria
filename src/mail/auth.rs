@@ -1019,9 +1019,24 @@ impl SpfResult {
 }
 
 pub fn generate_dkim_dns_record(selector: &str, domain: &str, public_key: &str) -> String {
+    let record = format!("v=DKIM1; k=rsa; p={}", public_key);
+
+    // Split at 255 character boundaries for DNS TXT record compliance
+    let chunks: Vec<String> = record
+        .as_bytes()
+        .chunks(255)
+        .map(|chunk| String::from_utf8_lossy(chunk).to_string())
+        .collect();
+
+    let value = chunks
+        .iter()
+        .map(|chunk| format!("\"{}\"", chunk))
+        .collect::<Vec<_>>()
+        .join(" ");
+
     format!(
-        "{}._domainkey.{} IN TXT \"v=DKIM1; k=rsa; p={}\"",
-        selector, domain, public_key
+        "{}._domainkey. IN TXT {}",
+        selector, domain, value
     )
 }
 
