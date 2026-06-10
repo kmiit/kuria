@@ -97,7 +97,11 @@ async function addUser() {
     message.value = '用户已创建'
     await loadData()
   } catch (e) {
-    error.value = '创建失败：' + (e.message || '未知错误')
+    if (e.status === 400) {
+      error.value = '创建失败：邮箱、密码或所属域名不符合要求'
+    } else {
+      error.value = '创建失败：' + (e.message || '未知错误')
+    }
   } finally {
     saving.value = false
   }
@@ -116,7 +120,14 @@ async function deleteUser(id, email) {
     users.value = users.value.filter((u) => u.id !== id)
     message.value = '用户已删除'
   } catch (e) {
-    error.value = e.message || '删除失败'
+    if (e.status === 404) {
+      error.value = '用户不存在或已被删除'
+      await loadData()
+    } else if (e.status === 400) {
+      error.value = '不能删除当前登录账号'
+    } else {
+      error.value = e.message || '删除失败'
+    }
   }
 }
 

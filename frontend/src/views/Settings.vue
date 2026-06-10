@@ -6,7 +6,10 @@ import PasswordInput from '../components/PasswordInput.vue'
 
 const settings = ref(null)
 const plugins = ref(null)
+const queueItems = ref([])
+const queueStatus = ref('queued')
 const loading = ref(true)
+const queueLoading = ref(false)
 const savingSettings = ref(false)
 const error = ref('')
 const result = ref('')
@@ -19,6 +22,12 @@ const confirmPassword = ref('')
 const changingPassword = ref(false)
 
 const domainPattern = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)+$/
+const queueStatusOptions = [
+  { value: 'queued', label: '待发送' },
+  { value: 'failed', label: '失败' },
+  { value: 'sent', label: '已发送' },
+  { value: '', label: '全部' },
+]
 
 const passwordStrength = computed(() => {
   const value = newPassword.value
@@ -123,7 +132,56 @@ function copyValue(value) {
   })
 }
 
-onMounted(loadSettings)
+async function loadQueue() {
+  queueLoading.value = true
+  try {
+    const data = await api.getQueue(queueStatus.value, 50)
+    queueItems.value = data.items || []
+  } catch (err) {
+    error.value = err.message || '加载外发队列失败'
+    queueItems.value = []
+  } finally {
+    queueLoading.value = false
+  }
+}
+
+async function retryQueueItem(item) {
+  result.value = ''
+  error.value = ''
+  try {
+    await api.retryQueueItem(item.id)
+    result.value = '已重新加入发送队列'
+    await loadQueue()
+  } catch (err) {
+    error.value = err.message || '重试失败'
+  }
+}
+
+async function deleteQueueItem(item) {
+  if (!confirm(`删除队列项 #${item.id}？`)) return
+  result.value = ''
+  error.value = ''
+  try {
+    await api.deleteQueueItem(item.id)
+    result.value = '队列项已删除'
+    await loadQueue()
+  } catch (err) {
+    error.value = err.message || '删除失败'
+  }
+}
+
+function queueStatusLabel(status) {
+  return queueStatusOptions.find((item) => item.value === status)?.label || status
+}
+
+function formatRecipients(recipients) {
+  return Array.isArray(recipients) ? recipients.join(', ') : ''
+}
+
+onMounted(async () => {
+  await loadSettings()
+  await loadQueue()
+})
 </script>
 
 <template>
@@ -245,6 +303,65 @@ onMounted(loadSettings)
               <div v-for="item in plugins.load_errors" :key="item.path" class="plugin-error">
                 <code>{{ item.path }}</code>
                 <span>{{ item.error }}</span>
+              </div>
+            </div>
+          </div>
+        </MiuixCard>
+
+        <MiuixCard>
+          <div class="card-inner">
+            <div class="section-row">
+              <h2 class="section-title">外发队列</h2>
+              <MiuixButton class="app-secondary-button" :disabled="queueLoading" @click="loadQueue">
+                {{ queueLoading ? '刷新中...' : '刷新' }}
+              </MiuixButton>
+            </div>
+
+            <div class="queue-tabs">
+              <button
+                v-for="option in queueStatusOptions"
+                :key="option.value"
+                type="button"
+                class="queue-tab"
+                :class="{ active: queueStatus === option.value }"
+                @click="queueStatus = option.value; loadQueue()"
+              >
+                {{ option.label }}
+              </button>
+            </div>
+
+            <div v-if="queueLoading" class="plugin-empty">正在加载外发队列...</div>
+            <div v-else-if="!queueItems.length" class="plugin-empty">当前没有队列项。</div>
+            <div v-else class="queue-list">
+              <div v-for="item in queueItems" :key="item.id" class="queue-item">
+                <div class="queue-main">
+                  <div class="queue-title">
+                    <span>#{{ item.id }}</span>
+                    <span class="status-pill" :class="{ active: item.status === 'queued' }">
+                      {{ queueStatusLabel(item.status) }}
+                    </span>
+                  </div>
+                  <div class="queue-meta">
+                    <span>发件人：{{ item.envelope_sender }}</span>
+                    <span>收件人：{{ formatRecipients(item.recipients) }}</span>
+                    <span>尝试：{{ item.attempts }} / {{ item.max_attempts }}</span>
+                    <span>大小：{{ item.raw_size }} B</span>
+                    <span v-if="item.next_attempt_at">下次：{{ item.next_attempt_at }}</span>
+                  </div>
+                  <div v-if="item.last_error" class="queue-error">{{ item.last_error }}</div>
+                </div>
+                <div class="queue-actions">
+                  <MiuixButton
+                    v-if="item.status === 'failed'"
+                    class="app-secondary-button"
+                    @click="retryQueueItem(item)"
+                  >
+                    重试
+                  </MiuixButton>
+                  <MiuixButton class="app-danger-button" @click="deleteQueueItem(item)">
+                    删除
+                  </MiuixButton>
+                </div>
               </div>
             </div>
           </div>
@@ -590,6 +707,82 @@ onMounted(loadSettings)
   font-size: 13px;
 }
 
+.queue-tabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.queue-tab {
+  padding: 7px 12px;
+  color: var(--m-color-text-secondary);
+  background: var(--m-color-bg);
+  border: 1px solid transparent;
+  border-radius: var(--app-radius);
+  cursor: pointer;
+  font: inherit;
+  font-size: 13px;
+}
+
+.queue-tab.active {
+  color: var(--m-color-primary);
+  border-color: var(--m-color-primary);
+  background: color-mix(in srgb, var(--m-color-primary) 10%, transparent);
+}
+
+.queue-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.queue-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 14px;
+  padding: 14px;
+  background: var(--m-color-bg);
+  border-radius: var(--app-radius);
+}
+
+.queue-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+  font-weight: 700;
+  color: var(--m-color-text);
+}
+
+.queue-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  color: var(--m-color-text-secondary);
+  font-size: 13px;
+}
+
+.queue-meta span {
+  overflow-wrap: anywhere;
+}
+
+.queue-error {
+  margin-top: 9px;
+  padding: 9px;
+  color: var(--app-danger);
+  background: color-mix(in srgb, var(--app-danger) 10%, transparent);
+  border-radius: var(--app-radius);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.queue-actions {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+}
+
 .password-form {
   display: flex;
   flex-direction: column;
@@ -638,9 +831,15 @@ onMounted(loadSettings)
   }
 
   .plugin-item,
+  .queue-item,
   .section-row {
     align-items: stretch;
+    grid-template-columns: 1fr;
     flex-direction: column;
+  }
+
+  .queue-actions {
+    justify-content: flex-start;
   }
 }
 </style>

@@ -19,8 +19,11 @@ async function request(path, options = {}) {
     throw new Error('Unauthorized')
   }
   if (!res.ok) {
-    const text = await res.text()
-    throw new Error(text || `HTTP ${res.status}`)
+    const { message, body } = await readError(res)
+    const error = new Error(message || `HTTP ${res.status}`)
+    error.status = res.status
+    error.body = body
+    throw error
   }
   const text = await res.text()
   if (!text) return {}
@@ -28,6 +31,42 @@ async function request(path, options = {}) {
     return JSON.parse(text)
   } catch {
     throw new Error(`接口 ${path} 返回了非 JSON 内容，请确认后端 API 已启动并且路由已生效`)
+  }
+}
+
+async function requestBlob(path) {
+  const token = localStorage.getItem('token')
+  const res = await fetch(`${BASE}${path}`, {
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  })
+  if (res.status === 401) {
+    localStorage.removeItem('token')
+    window.location.href = '/login'
+    throw new Error('Unauthorized')
+  }
+  if (!res.ok) {
+    const { message, body } = await readError(res)
+    const error = new Error(message || `HTTP ${res.status}`)
+    error.status = res.status
+    error.body = body
+    throw error
+  }
+  return res.blob()
+}
+
+async function readError(res) {
+  const text = await res.text()
+  if (!text) return { message: '', body: '' }
+  try {
+    const data = JSON.parse(text)
+    return {
+      message: data.error || data.message || text,
+      body: data,
+    }
+  } catch {
+    return { message: text, body: text }
   }
 }
 
@@ -81,7 +120,7 @@ export const api = {
   getMailboxCounts: () => request('/api/emails/mailboxes'),
 
   // Attachments
-  getAttachmentUrl: (id) => `/api/attachments/${id}`,
+  downloadAttachment: (id) => requestBlob(`/api/attachments/${id}`),
 
   // Domains
   getDomains: () => request('/api/domains'),
@@ -114,4 +153,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ old_password, new_password }),
     }),
+
+  // Queue
+  getQueue: (status = '', limit = 50) => request(withQuery('/api/queue', { status, limit })),
+  retryQueueItem: (id) => request(`/api/queue/${id}/retry`, { method: 'POST' }),
+  deleteQueueItem: (id) => request(`/api/queue/${id}`, { method: 'DELETE' }),
 }

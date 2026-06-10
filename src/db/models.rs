@@ -52,6 +52,21 @@ pub struct Attachment {
     pub size: Option<i64>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct OutboundQueueItem {
+    pub id: i64,
+    pub envelope_sender: String,
+    pub recipients: String,
+    pub raw_message: Vec<u8>,
+    pub attempts: i64,
+    pub max_attempts: i64,
+    pub status: String,
+    pub last_error: Option<String>,
+    pub next_attempt_at: Option<NaiveDateTime>,
+    pub created_at: Option<NaiveDateTime>,
+    pub updated_at: Option<NaiveDateTime>,
+}
+
 // Request/Response models for the web API
 
 #[derive(Debug, Deserialize)]

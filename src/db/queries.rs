@@ -2,6 +2,10 @@ use sqlx::SqlitePool;
 
 use super::models::*;
 
+pub const OUTBOUND_STATUS_QUEUED: &str = "queued";
+pub const OUTBOUND_STATUS_SENT: &str = "sent";
+pub const OUTBOUND_STATUS_FAILED: &str = "failed";
+
 // System settings
 pub async fn get_system_setting(pool: &SqlitePool, key: &str) -> anyhow::Result<Option<String>> {
     let value = sqlx::query_scalar::<_, String>("SELECT value FROM system_settings WHERE key = ?")
@@ -72,6 +76,14 @@ pub async fn delete_domain(pool: &SqlitePool, domain_id: i64) -> anyhow::Result<
     Ok(())
 }
 
+pub async fn count_users_by_domain(pool: &SqlitePool, domain_id: i64) -> anyhow::Result<i64> {
+    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM users WHERE domain_id = ?")
+        .bind(domain_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(count.0)
+}
+
 pub async fn update_domain_dkim(
     pool: &SqlitePool,
     domain_id: i64,
@@ -139,12 +151,28 @@ pub async fn list_users(pool: &SqlitePool) -> anyhow::Result<Vec<User>> {
     Ok(users)
 }
 
-pub async fn delete_user(pool: &SqlitePool, user_id: i64) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM users WHERE id = ?")
+pub async fn delete_user(pool: &SqlitePool, user_id: i64) -> anyhow::Result<bool> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        "DELETE FROM attachments WHERE email_id IN (SELECT id FROM emails WHERE user_id = ?)",
+    )
+    .bind(user_id)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("DELETE FROM emails WHERE user_id = ?")
         .bind(user_id)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
-    Ok(())
+
+    let result = sqlx::query("DELETE FROM users WHERE id = ?")
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(result.rows_affected() > 0)
 }
 
 // Email queries
@@ -198,6 +226,21 @@ pub async fn get_emails_by_user(
     Ok(emails)
 }
 
+pub async fn get_emails_for_imap(
+    pool: &SqlitePool,
+    user_id: i64,
+    mailbox: &str,
+) -> anyhow::Result<Vec<Email>> {
+    let emails = sqlx::query_as::<_, Email>(
+        "SELECT * FROM emails WHERE user_id = ? AND mailbox = ? ORDER BY id ASC",
+    )
+    .bind(user_id)
+    .bind(mailbox)
+    .fetch_all(pool)
+    .await?;
+    Ok(emails)
+}
+
 pub async fn get_email_by_id(pool: &SqlitePool, email_id: i64) -> anyhow::Result<Option<Email>> {
     let email = sqlx::query_as::<_, Email>("SELECT * FROM emails WHERE id = ?")
         .bind(email_id)
@@ -214,18 +257,44 @@ pub async fn mark_email_read(pool: &SqlitePool, email_id: i64) -> anyhow::Result
     Ok(())
 }
 
+pub async fn set_email_read(pool: &SqlitePool, email_id: i64, is_read: bool) -> anyhow::Result<()> {
+    sqlx::query("UPDATE emails SET is_read = ? WHERE id = ?")
+        .bind(is_read)
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn set_email_deleted(
+    pool: &SqlitePool,
+    email_id: i64,
+    is_deleted: bool,
+) -> anyhow::Result<()> {
+    sqlx::query("UPDATE emails SET is_deleted = ? WHERE id = ?")
+        .bind(is_deleted)
+        .bind(email_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
 pub async fn update_email_auth(
     pool: &SqlitePool,
     email_id: i64,
     spf_result: Option<&str>,
     dkim_signature: Option<&str>,
+    dmarc_result: Option<&str>,
 ) -> anyhow::Result<()> {
-    sqlx::query("UPDATE emails SET spf_result = ?, dkim_signature = ? WHERE id = ?")
-        .bind(spf_result)
-        .bind(dkim_signature)
-        .bind(email_id)
-        .execute(pool)
-        .await?;
+    sqlx::query(
+        "UPDATE emails SET spf_result = ?, dkim_signature = ?, dmarc_result = ? WHERE id = ?",
+    )
+    .bind(spf_result)
+    .bind(dkim_signature)
+    .bind(dmarc_result)
+    .bind(email_id)
+    .execute(pool)
+    .await?;
     Ok(())
 }
 
@@ -244,6 +313,100 @@ pub async fn move_email(pool: &SqlitePool, email_id: i64, mailbox: &str) -> anyh
         .execute(pool)
         .await?;
     Ok(())
+}
+
+pub async fn copy_email_to_mailbox(
+    pool: &SqlitePool,
+    email_id: i64,
+    user_id: i64,
+    mailbox: &str,
+) -> anyhow::Result<Option<Email>> {
+    let mut tx = pool.begin().await?;
+
+    let source = sqlx::query_as::<_, Email>("SELECT * FROM emails WHERE id = ? AND user_id = ?")
+        .bind(email_id)
+        .bind(user_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+
+    let Some(source) = source else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+
+    let copied = sqlx::query_as::<_, Email>(
+        r#"
+        INSERT INTO emails (
+            message_id, sender, recipients, subject, body_text, body_html, raw_message,
+            dkim_signature, spf_result, dmarc_result, is_read, is_deleted, mailbox, user_id
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING *
+        "#,
+    )
+    .bind(source.message_id.as_deref())
+    .bind(&source.sender)
+    .bind(&source.recipients)
+    .bind(source.subject.as_deref())
+    .bind(source.body_text.as_deref())
+    .bind(source.body_html.as_deref())
+    .bind(source.raw_message.as_deref())
+    .bind(source.dkim_signature.as_deref())
+    .bind(source.spf_result.as_deref())
+    .bind(source.dmarc_result.as_deref())
+    .bind(source.is_read)
+    .bind(source.is_deleted)
+    .bind(mailbox)
+    .bind(user_id)
+    .fetch_one(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO attachments (email_id, filename, content_type, data, size)
+        SELECT ?, filename, content_type, data, size
+        FROM attachments
+        WHERE email_id = ?
+        "#,
+    )
+    .bind(copied.id)
+    .bind(email_id)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+    Ok(Some(copied))
+}
+
+pub async fn expunge_deleted_emails(
+    pool: &SqlitePool,
+    user_id: i64,
+    mailbox: &str,
+) -> anyhow::Result<u64> {
+    let mut tx = pool.begin().await?;
+
+    sqlx::query(
+        r#"
+        DELETE FROM attachments
+        WHERE email_id IN (
+            SELECT id FROM emails WHERE user_id = ? AND mailbox = ? AND is_deleted = TRUE
+        )
+        "#,
+    )
+    .bind(user_id)
+    .bind(mailbox)
+    .execute(&mut *tx)
+    .await?;
+
+    let result =
+        sqlx::query("DELETE FROM emails WHERE user_id = ? AND mailbox = ? AND is_deleted = TRUE")
+            .bind(user_id)
+            .bind(mailbox)
+            .execute(&mut *tx)
+            .await?;
+
+    tx.commit().await?;
+    Ok(result.rows_affected())
 }
 
 pub async fn count_emails_by_user(
@@ -373,4 +536,298 @@ pub async fn get_attachment_by_id(
         .fetch_optional(pool)
         .await?;
     Ok(attachment)
+}
+
+// Outbound queue queries
+pub async fn enqueue_outbound_email(
+    pool: &SqlitePool,
+    envelope_sender: &str,
+    recipients: &[String],
+    raw_message: &[u8],
+) -> anyhow::Result<OutboundQueueItem> {
+    let recipients = serde_json::to_string(recipients)?;
+    let item = sqlx::query_as::<_, OutboundQueueItem>(
+        r#"
+        INSERT INTO outbound_queue (envelope_sender, recipients, raw_message, status, next_attempt_at)
+        VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+        RETURNING *
+        "#,
+    )
+    .bind(envelope_sender)
+    .bind(recipients)
+    .bind(raw_message)
+    .bind(OUTBOUND_STATUS_QUEUED)
+    .fetch_one(pool)
+    .await?;
+    Ok(item)
+}
+
+pub async fn get_due_outbound_queue_items(
+    pool: &SqlitePool,
+    limit: i64,
+) -> anyhow::Result<Vec<OutboundQueueItem>> {
+    let items = sqlx::query_as::<_, OutboundQueueItem>(
+        r#"
+        SELECT *
+        FROM outbound_queue
+        WHERE status = ?
+          AND (next_attempt_at IS NULL OR next_attempt_at <= CURRENT_TIMESTAMP)
+        ORDER BY next_attempt_at ASC, id ASC
+        LIMIT ?
+        "#,
+    )
+    .bind(OUTBOUND_STATUS_QUEUED)
+    .bind(limit)
+    .fetch_all(pool)
+    .await?;
+    Ok(items)
+}
+
+pub async fn list_outbound_queue_items(
+    pool: &SqlitePool,
+    status: Option<&str>,
+    limit: i64,
+) -> anyhow::Result<Vec<OutboundQueueItem>> {
+    let limit = limit.clamp(1, 200);
+    let items = if let Some(status) = status.filter(|status| !status.is_empty()) {
+        sqlx::query_as::<_, OutboundQueueItem>(
+            r#"
+            SELECT *
+            FROM outbound_queue
+            WHERE status = ?
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(status)
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as::<_, OutboundQueueItem>(
+            r#"
+            SELECT *
+            FROM outbound_queue
+            ORDER BY created_at DESC, id DESC
+            LIMIT ?
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await?
+    };
+    Ok(items)
+}
+
+pub async fn retry_outbound_queue_item(
+    pool: &SqlitePool,
+    id: i64,
+) -> anyhow::Result<Option<OutboundQueueItem>> {
+    let item = sqlx::query_as::<_, OutboundQueueItem>(
+        r#"
+        UPDATE outbound_queue
+        SET status = ?,
+            last_error = NULL,
+            next_attempt_at = CURRENT_TIMESTAMP,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND status = ?
+        RETURNING *
+        "#,
+    )
+    .bind(OUTBOUND_STATUS_QUEUED)
+    .bind(id)
+    .bind(OUTBOUND_STATUS_FAILED)
+    .fetch_optional(pool)
+    .await?;
+    Ok(item)
+}
+
+pub async fn delete_outbound_queue_item(pool: &SqlitePool, id: i64) -> anyhow::Result<bool> {
+    let result = sqlx::query("DELETE FROM outbound_queue WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    Ok(result.rows_affected() > 0)
+}
+
+pub async fn mark_outbound_sent(pool: &SqlitePool, id: i64) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE outbound_queue
+        SET status = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        "#,
+    )
+    .bind(OUTBOUND_STATUS_SENT)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_outbound_retry(
+    pool: &SqlitePool,
+    item: &OutboundQueueItem,
+    error: &str,
+) -> anyhow::Result<()> {
+    let next_attempt = chrono::Utc::now().naive_utc() + retry_delay(item.attempts + 1);
+    sqlx::query(
+        r#"
+        UPDATE outbound_queue
+        SET attempts = attempts + 1,
+            last_error = ?,
+            next_attempt_at = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        "#,
+    )
+    .bind(error)
+    .bind(next_attempt)
+    .bind(item.id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_outbound_failed(
+    pool: &SqlitePool,
+    item: &OutboundQueueItem,
+    error: &str,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE outbound_queue
+        SET attempts = attempts + 1,
+            status = ?,
+            last_error = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = ?
+        "#,
+    )
+    .bind(OUTBOUND_STATUS_FAILED)
+    .bind(error)
+    .bind(item.id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub fn outbound_recipients(item: &OutboundQueueItem) -> Vec<String> {
+    serde_json::from_str(&item.recipients).unwrap_or_default()
+}
+
+pub fn outbound_should_fail_permanently(item: &OutboundQueueItem) -> bool {
+    item.attempts + 1 >= item.max_attempts
+}
+
+fn retry_delay(next_attempt_number: i64) -> chrono::Duration {
+    let minutes = match next_attempt_number {
+        attempt if attempt <= 1 => 5,
+        2 => 15,
+        3 => 60,
+        4 => 6 * 60,
+        _ => 24 * 60,
+    };
+    chrono::Duration::minutes(minutes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn outbound_retry_delay_increases() {
+        assert_eq!(retry_delay(1), chrono::Duration::minutes(5));
+        assert_eq!(retry_delay(2), chrono::Duration::minutes(15));
+        assert_eq!(retry_delay(3), chrono::Duration::minutes(60));
+        assert_eq!(retry_delay(4), chrono::Duration::minutes(360));
+        assert_eq!(retry_delay(5), chrono::Duration::minutes(1440));
+    }
+
+    #[tokio::test]
+    async fn outbound_queue_returns_only_due_queued_items() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        crate::db::run_migrations(&db).await.expect("migrations");
+        let due = enqueue_outbound_email(
+            &db,
+            "sender@example.com",
+            &["a@example.net".to_string()],
+            b"message",
+        )
+        .await
+        .expect("due");
+        let future = enqueue_outbound_email(
+            &db,
+            "sender@example.com",
+            &["b@example.net".to_string()],
+            b"message",
+        )
+        .await
+        .expect("future");
+        mark_outbound_retry(&db, &future, "try later")
+            .await
+            .expect("retry");
+        let sent = enqueue_outbound_email(
+            &db,
+            "sender@example.com",
+            &["c@example.net".to_string()],
+            b"message",
+        )
+        .await
+        .expect("sent");
+        mark_outbound_sent(&db, sent.id).await.expect("mark sent");
+
+        let items = get_due_outbound_queue_items(&db, 10).await.expect("items");
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].id, due.id);
+    }
+
+    #[tokio::test]
+    async fn failed_outbound_item_can_be_retried_and_deleted() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        crate::db::run_migrations(&db).await.expect("migrations");
+        let item = enqueue_outbound_email(
+            &db,
+            "sender@example.com",
+            &["a@example.net".to_string()],
+            b"message",
+        )
+        .await
+        .expect("queued");
+        mark_outbound_failed(&db, &item, "no route")
+            .await
+            .expect("failed");
+
+        let failed = list_outbound_queue_items(&db, Some(OUTBOUND_STATUS_FAILED), 10)
+            .await
+            .expect("failed items");
+        assert_eq!(failed.len(), 1);
+
+        let retried = retry_outbound_queue_item(&db, item.id)
+            .await
+            .expect("retry")
+            .expect("item");
+        assert_eq!(retried.status, OUTBOUND_STATUS_QUEUED);
+        assert_eq!(retried.last_error, None);
+
+        assert!(
+            delete_outbound_queue_item(&db, item.id)
+                .await
+                .expect("delete")
+        );
+        assert!(
+            list_outbound_queue_items(&db, None, 10)
+                .await
+                .expect("items")
+                .is_empty()
+        );
+    }
 }

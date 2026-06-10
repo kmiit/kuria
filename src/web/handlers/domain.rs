@@ -7,7 +7,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use rand_core::OsRng;
 use rsa::RsaPrivateKey;
-use rsa::pkcs8::{EncodePrivateKey, EncodePublicKey, LineEnding};
+use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding as Pkcs1LineEnding};
+use rsa::pkcs8::EncodePublicKey;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -27,7 +28,7 @@ fn generate_dkim_key_pair(key_bits: usize) -> anyhow::Result<DkimKeyPair> {
     let private_key = RsaPrivateKey::new(&mut rng, key_bits)?;
     let public_key = private_key.to_public_key();
 
-    let private_key_pem = private_key.to_pkcs8_pem(LineEnding::LF)?.to_string();
+    let private_key_pem = private_key.to_pkcs1_pem(Pkcs1LineEnding::LF)?.to_string();
     let public_key_der = public_key.to_public_key_der()?;
     let public_key_dns = STANDARD.encode(public_key_der.as_bytes());
 
@@ -73,6 +74,43 @@ fn build_dkim_selector(base_selector: &str, existing_public_key: Option<&str>) -
     }
 }
 
+fn normalize_domain(value: &str) -> String {
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    let value = if lower.starts_with("http://") {
+        &value[7..]
+    } else if lower.starts_with("https://") {
+        &value[8..]
+    } else {
+        value
+    };
+
+    value
+        .trim()
+        .split('/')
+        .next()
+        .unwrap_or("")
+        .trim_end_matches('.')
+        .to_ascii_lowercase()
+}
+
+fn is_valid_domain(value: &str) -> bool {
+    let mut labels = value.split('.').peekable();
+    if labels.peek().is_none() || !value.contains('.') || value.len() > 253 {
+        return false;
+    }
+
+    labels.all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && label
+                .bytes()
+                .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-')
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+    })
+}
+
 pub async fn list_domains(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -97,7 +135,12 @@ pub async fn create_domain(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let domain = queries::create_domain(&state.db, &payload.domain_name)
+    let domain_name = normalize_domain(&payload.domain_name);
+    if !is_valid_domain(&domain_name) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let domain = queries::create_domain(&state.db, &domain_name)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -111,6 +154,18 @@ pub async fn delete_domain(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     if !claims.is_admin {
         return Err(StatusCode::FORBIDDEN);
+    }
+
+    let domain = queries::get_domain_by_id(&state.db, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    let user_count = queries::count_users_by_domain(&state.db, domain.id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    if user_count > 0 {
+        return Err(StatusCode::CONFLICT);
     }
 
     queries::delete_domain(&state.db, id)
@@ -181,6 +236,7 @@ mod tests {
 
         assert_ne!(first.public_key_dns, second.public_key_dns);
         assert_ne!(first.private_key_pem, second.private_key_pem);
+        assert!(first.private_key_pem.contains("BEGIN RSA PRIVATE KEY"));
     }
 
     #[test]
@@ -207,5 +263,16 @@ mod tests {
         let second = build_dkim_selector("kuria", Some("old-key"));
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn domain_names_are_normalized_and_validated() {
+        assert_eq!(
+            normalize_domain(" HTTPS://Mail.Example.COM/path "),
+            "mail.example.com"
+        );
+        assert!(is_valid_domain("example.com"));
+        assert!(!is_valid_domain("localhost"));
+        assert!(!is_valid_domain("-example.com"));
     }
 }

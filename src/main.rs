@@ -1,6 +1,5 @@
 mod config;
 mod db;
-mod dns;
 mod error;
 mod imap;
 mod mail;
@@ -294,6 +293,13 @@ async fn main() -> anyhow::Result<()> {
         if let Err(e) = axum::serve(web_listener, app).await {
             tracing::error!("Web server error: {}", e);
         }
+    });
+
+    let queue_config = config.clone();
+    let queue_db = db.clone();
+    tokio::spawn(async move {
+        let worker = mail::queue::OutboundQueueWorker::new(queue_config, queue_db);
+        worker.run().await;
     });
 
     tracing::info!("Kuria Mail Server started successfully");

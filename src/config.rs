@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const HOSTNAME_SETTING_KEY: &str = "server.hostname";
+const DEFAULT_JWT_SECRET: &str = "change-me-in-production";
+const MIN_JWT_SECRET_LEN: usize = 32;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
@@ -56,37 +58,24 @@ pub struct TlsConfig {
     pub key_path: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum TlsMode {
+    #[default]
     Auto,
     Internal,
     External,
     Off,
 }
 
-impl Default for TlsMode {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
 impl TlsConfig {
     pub fn certificates_present(&self) -> bool {
         self.cert_path.is_file() && self.key_path.is_file()
-    }
-
-    pub fn internal_tls_enabled(&self) -> bool {
-        match self.mode {
-            TlsMode::Auto | TlsMode::Internal => self.certificates_present(),
-            TlsMode::External | TlsMode::Off => false,
-        }
     }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct DkimConfig {
-    #[allow(dead_code)]
     pub key_size: u32,
     pub selector: String,
 }
@@ -102,9 +91,45 @@ impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path)
             .unwrap_or_else(|_| include_str!("../config.toml").to_string());
-        let config: Config = toml::from_str(&content)?;
+        let mut config: Config = toml::from_str(&content)?;
+        config.apply_env_overrides();
+        config.harden_runtime_secrets();
         Ok(config)
     }
+
+    fn apply_env_overrides(&mut self) {
+        if let Ok(secret) = std::env::var("KURIA_JWT_SECRET")
+            && !secret.trim().is_empty()
+        {
+            self.web.jwt_secret = secret;
+        }
+    }
+
+    fn harden_runtime_secrets(&mut self) {
+        if is_insecure_jwt_secret(&self.web.jwt_secret) {
+            tracing::warn!(
+                "web.jwt_secret is missing, too short, or still set to the default value; \
+                 using a temporary random JWT secret for this process. Set KURIA_JWT_SECRET \
+                 or web.jwt_secret to a stable random value to keep sessions valid after restart."
+            );
+            self.web.jwt_secret = generate_ephemeral_jwt_secret();
+        }
+    }
+}
+
+fn is_insecure_jwt_secret(secret: &str) -> bool {
+    let secret = secret.trim();
+    secret.is_empty() || secret == DEFAULT_JWT_SECRET || secret.len() < MIN_JWT_SECRET_LEN
+}
+
+fn generate_ephemeral_jwt_secret() -> String {
+    use base64::Engine;
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use rand_core::{OsRng, RngCore};
+
+    let mut bytes = [0u8; 32];
+    OsRng.fill_bytes(&mut bytes);
+    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 pub async fn effective_hostname(config: &Config, db: &sqlx::SqlitePool) -> String {
@@ -134,7 +159,7 @@ impl Default for Config {
             },
             web: WebConfig {
                 listen_addr: "0.0.0.0:8080".to_string(),
-                jwt_secret: "change-me-in-production".to_string(),
+                jwt_secret: DEFAULT_JWT_SECRET.to_string(),
                 trust_proxy_headers: false,
             },
             database: DatabaseConfig {
@@ -151,5 +176,36 @@ impl Default for Config {
             },
             plugins: None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn insecure_jwt_secrets_are_detected() {
+        assert!(is_insecure_jwt_secret(""));
+        assert!(is_insecure_jwt_secret(DEFAULT_JWT_SECRET));
+        assert!(is_insecure_jwt_secret("short"));
+        assert!(!is_insecure_jwt_secret("0123456789abcdef0123456789abcdef"));
+    }
+
+    #[test]
+    fn harden_runtime_secrets_replaces_default_jwt_secret() {
+        let mut config = Config::default();
+        config.harden_runtime_secrets();
+
+        assert_ne!(config.web.jwt_secret, DEFAULT_JWT_SECRET);
+        assert!(!is_insecure_jwt_secret(&config.web.jwt_secret));
+    }
+
+    #[test]
+    fn harden_runtime_secrets_keeps_strong_jwt_secret() {
+        let mut config = Config::default();
+        config.web.jwt_secret = "0123456789abcdef0123456789abcdef".to_string();
+        config.harden_runtime_secrets();
+
+        assert_eq!(config.web.jwt_secret, "0123456789abcdef0123456789abcdef");
     }
 }

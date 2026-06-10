@@ -1,16 +1,25 @@
+use std::collections::HashMap;
 use std::sync::Arc;
-use tracing::{error, info, warn};
+use tracing::info;
 
 use crate::config::Config;
 use crate::db::queries;
-use crate::mail::parser;
-use crate::smtp::sender::MailSender;
+use crate::smtp::sender::{MailSender, RawComposedMessage};
 
-#[allow(dead_code)]
 pub struct MailDelivery {
     config: Arc<Config>,
     db: sqlx::SqlitePool,
     sender: MailSender,
+}
+
+pub struct ComposedEmail<'a> {
+    pub from: &'a str,
+    pub to: &'a [String],
+    pub cc: &'a [String],
+    pub bcc: &'a [String],
+    pub subject: &'a str,
+    pub body_text: Option<&'a str>,
+    pub body_html: Option<&'a str>,
 }
 
 impl MailDelivery {
@@ -19,103 +28,339 @@ impl MailDelivery {
         Self { config, db, sender }
     }
 
-    /// Process an incoming email: parse, store locally, and forward if needed
-    #[allow(dead_code)]
-    pub async fn deliver_incoming(
-        &self,
-        raw_data: &[u8],
-        envelope_sender: &str,
-        envelope_recipients: &[String],
-    ) -> anyhow::Result<()> {
-        let parsed = parser::parse_email(raw_data)?;
-        let hostname = crate::config::effective_hostname(&self.config, &self.db).await;
+    pub async fn send_composed_email(&self, message: ComposedEmail<'_>) -> anyhow::Result<Vec<u8>> {
+        let mut envelope_recipients = Vec::new();
+        extend_unique(&mut envelope_recipients, message.to);
+        extend_unique(&mut envelope_recipients, message.cc);
+        extend_unique(&mut envelope_recipients, message.bcc);
 
-        for rcpt in envelope_recipients {
-            // Check if this is a local recipient
-            if let Some(domain) = rcpt.split('@').next_back() {
-                if domain == hostname || is_local_domain(&self.db, domain).await {
-                    // Local delivery
-                    if let Some(user) = queries::get_user_by_email(&self.db, rcpt).await? {
-                        let recipients_json =
-                            serde_json::to_string(envelope_recipients).unwrap_or_default();
+        let (local_recipients, external_recipients) =
+            self.split_local_and_external(&envelope_recipients).await?;
 
-                        let email = queries::save_email(
-                            &self.db,
-                            parsed.message_id.as_deref(),
-                            envelope_sender,
-                            &recipients_json,
-                            parsed.subject.as_deref(),
-                            parsed.body_text.as_deref(),
-                            parsed.body_html.as_deref(),
-                            Some(raw_data),
-                            user.id,
-                            "INBOX",
-                        )
-                        .await?;
+        let sent_raw_message = self
+            .sender
+            .build_raw_message_with_headers(RawComposedMessage {
+                from: message.from,
+                to: message.to,
+                cc: message.cc,
+                envelope_recipients: &envelope_recipients,
+                subject: message.subject,
+                body_text: message.body_text,
+                body_html: message.body_html,
+            })
+            .await?;
+        let visible_recipients = visible_recipients_json(message.to, message.cc);
+        for local_user in local_recipients {
+            queries::save_email(
+                &self.db,
+                None,
+                message.from,
+                &visible_recipients,
+                Some(message.subject),
+                message.body_text,
+                message.body_html,
+                Some(&sent_raw_message),
+                local_user.id,
+                "INBOX",
+            )
+            .await?;
+            info!(
+                "Email delivered locally from {} to {}",
+                message.from, local_user.email
+            );
+        }
 
-                        // Save attachments
-                        for att in &parsed.attachments {
-                            if !att.data.is_empty()
-                                && let Err(e) = queries::save_attachment(
-                                    &self.db,
-                                    email.id,
-                                    att.filename.as_deref(),
-                                    att.content_type.as_deref(),
-                                    &att.data,
-                                )
-                                .await
-                            {
-                                warn!("Failed to save attachment for email {}: {}", email.id, e);
-                            }
-                        }
-
-                        info!("Email delivered locally to {} (id: {})", rcpt, email.id);
-                    } else {
-                        warn!("Local user not found: {}", rcpt);
-                    }
-                } else {
-                    // External delivery - forward
-                    info!("Forwarding email to external address: {}", rcpt);
-                    if let Err(e) = self
-                        .sender
-                        .send(
-                            envelope_sender,
-                            std::slice::from_ref(rcpt),
-                            parsed.subject.as_deref().unwrap_or("(no subject)"),
-                            parsed.body_text.as_deref(),
-                            parsed.body_html.as_deref(),
-                        )
-                        .await
-                    {
-                        error!("Failed to forward email to {}: {}", rcpt, e);
-                    }
-                }
+        if !external_recipients.is_empty() {
+            for recipients in group_recipients_by_domain(&external_recipients)?.into_values() {
+                let queued = queries::enqueue_outbound_email(
+                    &self.db,
+                    message.from,
+                    &recipients,
+                    &sent_raw_message,
+                )
+                .await?;
+                info!(
+                    "Queued outbound email {} from {} to {:?}",
+                    queued.id, message.from, recipients
+                );
             }
         }
 
-        Ok(())
+        Ok(sent_raw_message)
     }
 
-    /// Send an email from a local user
-    pub async fn send_email(
+    pub async fn relay_raw_email(
         &self,
         from: &str,
         to: &[String],
-        subject: &str,
-        body_text: Option<&str>,
-        body_html: Option<&str>,
+        raw_message: &[u8],
     ) -> anyhow::Result<()> {
-        self.sender
-            .send(from, to, subject, body_text, body_html)
-            .await
+        for recipients in group_recipients_by_domain(to)?.into_values() {
+            let queued =
+                queries::enqueue_outbound_email(&self.db, from, &recipients, raw_message).await?;
+            info!(
+                "Queued raw outbound email {} from {} to {:?}",
+                queued.id, from, recipients
+            );
+        }
+        Ok(())
+    }
+
+    async fn split_local_and_external(
+        &self,
+        recipients: &[String],
+    ) -> anyhow::Result<(Vec<crate::db::models::User>, Vec<String>)> {
+        let hostname = crate::config::effective_hostname(&self.config, &self.db).await;
+        let mut local = Vec::new();
+        let mut external = Vec::new();
+
+        for recipient in recipients {
+            let Some(domain) = recipient.split('@').next_back() else {
+                anyhow::bail!("Invalid recipient address: {}", recipient);
+            };
+
+            if domain.eq_ignore_ascii_case(&hostname) || is_local_domain(&self.db, domain).await {
+                let Some(user) = queries::get_user_by_email(&self.db, recipient).await? else {
+                    anyhow::bail!("Local recipient does not exist: {}", recipient);
+                };
+                local.push(user);
+            } else {
+                external.push(recipient.clone());
+            }
+        }
+
+        Ok((local, external))
     }
 }
 
-#[allow(dead_code)]
 async fn is_local_domain(db: &sqlx::SqlitePool, domain: &str) -> bool {
     queries::get_domain_by_name(db, domain)
         .await
         .ok()
         .flatten()
         .is_some()
+}
+
+fn extend_unique(target: &mut Vec<String>, values: &[String]) {
+    for value in values {
+        if !target
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(value))
+        {
+            target.push(value.clone());
+        }
+    }
+}
+
+fn visible_recipients_json(to: &[String], cc: &[String]) -> String {
+    let mut visible = Vec::new();
+    extend_unique(&mut visible, to);
+    extend_unique(&mut visible, cc);
+    serde_json::to_string(&visible).unwrap_or_default()
+}
+
+fn group_recipients_by_domain(
+    recipients: &[String],
+) -> anyhow::Result<HashMap<String, Vec<String>>> {
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    for recipient in recipients {
+        let Some(domain) = recipient.split('@').next_back() else {
+            anyhow::bail!("Invalid recipient address: {}", recipient);
+        };
+        groups
+            .entry(domain.to_ascii_lowercase())
+            .or_default()
+            .push(recipient.clone());
+    }
+    Ok(groups)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn visible_recipients_exclude_bcc_and_dedupe_case_insensitively() {
+        let to = vec!["User@example.com".to_string()];
+        let cc = vec!["user@example.com".to_string(), "cc@example.com".to_string()];
+        assert_eq!(
+            visible_recipients_json(&to, &cc),
+            r#"["User@example.com","cc@example.com"]"#
+        );
+    }
+
+    #[test]
+    fn recipients_are_grouped_by_domain_case_insensitively() {
+        let groups = group_recipients_by_domain(&[
+            "a@example.net".to_string(),
+            "b@Example.NET".to_string(),
+            "c@example.org".to_string(),
+        ])
+        .expect("groups");
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(
+            groups.get("example.net"),
+            Some(&vec![
+                "a@example.net".to_string(),
+                "b@Example.NET".to_string()
+            ])
+        );
+        assert_eq!(
+            groups.get("example.org"),
+            Some(&vec!["c@example.org".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn composed_external_email_is_queued() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        crate::db::run_migrations(&db).await.expect("migrations");
+        let delivery = MailDelivery::new(Arc::new(Config::default()), db.clone());
+        let to = vec!["remote@example.net".to_string()];
+
+        let sent_raw = delivery
+            .send_composed_email(ComposedEmail {
+                from: "sender@example.com",
+                to: &to,
+                cc: &[],
+                bcc: &[],
+                subject: "Queued",
+                body_text: Some("Hello"),
+                body_html: None,
+            })
+            .await
+            .expect("send");
+
+        let queued = queries::get_due_outbound_queue_items(&db, 10)
+            .await
+            .expect("queued");
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].envelope_sender, "sender@example.com");
+        assert_eq!(
+            queries::outbound_recipients(&queued[0]),
+            vec!["remote@example.net".to_string()]
+        );
+        assert!(String::from_utf8_lossy(&queued[0].raw_message).contains("Subject: Queued"));
+        assert_eq!(queued[0].raw_message, sent_raw);
+    }
+
+    #[tokio::test]
+    async fn composed_local_email_is_saved_with_raw_message() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        crate::db::run_migrations(&db).await.expect("migrations");
+        let domain = queries::create_domain(&db, "example.com")
+            .await
+            .expect("domain");
+        let user = queries::create_user(&db, "local@example.com", "hash", domain.id, false)
+            .await
+            .expect("user");
+        let delivery = MailDelivery::new(Arc::new(Config::default()), db.clone());
+        let to = vec!["local@example.com".to_string()];
+
+        let sent_raw = delivery
+            .send_composed_email(ComposedEmail {
+                from: "sender@example.com",
+                to: &to,
+                cc: &[],
+                bcc: &[],
+                subject: "Local",
+                body_text: Some("Hello local"),
+                body_html: None,
+            })
+            .await
+            .expect("send");
+
+        let inbox = queries::get_emails_for_imap(&db, user.id, "INBOX")
+            .await
+            .expect("inbox");
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].raw_message.as_deref(), Some(sent_raw.as_slice()));
+        assert!(String::from_utf8_lossy(&sent_raw).contains("Subject: Local"));
+    }
+
+    #[tokio::test]
+    async fn composed_external_email_queues_one_item_per_domain() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        crate::db::run_migrations(&db).await.expect("migrations");
+        let delivery = MailDelivery::new(Arc::new(Config::default()), db.clone());
+        let to = vec![
+            "a@example.net".to_string(),
+            "b@example.net".to_string(),
+            "c@example.org".to_string(),
+        ];
+
+        delivery
+            .send_composed_email(ComposedEmail {
+                from: "sender@example.com",
+                to: &to,
+                cc: &[],
+                bcc: &[],
+                subject: "Grouped",
+                body_text: Some("Hello"),
+                body_html: None,
+            })
+            .await
+            .expect("send");
+
+        let queued = queries::get_due_outbound_queue_items(&db, 10)
+            .await
+            .expect("queued");
+        let mut recipient_sets = queued
+            .iter()
+            .map(queries::outbound_recipients)
+            .collect::<Vec<_>>();
+        recipient_sets.sort_by_key(|recipients| recipients.join(","));
+
+        assert_eq!(queued.len(), 2);
+        assert_eq!(
+            recipient_sets,
+            vec![
+                vec!["a@example.net".to_string(), "b@example.net".to_string()],
+                vec!["c@example.org".to_string()],
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn raw_relay_queues_one_item_per_domain() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        crate::db::run_migrations(&db).await.expect("migrations");
+        let delivery = MailDelivery::new(Arc::new(Config::default()), db.clone());
+
+        delivery
+            .relay_raw_email(
+                "sender@example.com",
+                &["a@example.net".to_string(), "b@example.org".to_string()],
+                b"From: sender@example.com\r\n\r\nHello",
+            )
+            .await
+            .expect("relay");
+
+        let queued = queries::get_due_outbound_queue_items(&db, 10)
+            .await
+            .expect("queued");
+        assert_eq!(queued.len(), 2);
+        assert!(
+            queued
+                .iter()
+                .all(|item| queries::outbound_recipients(item).len() == 1)
+        );
+    }
 }

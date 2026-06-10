@@ -9,7 +9,7 @@ use serde_json::json;
 
 use crate::db::models::SendEmailRequest;
 use crate::db::queries;
-use crate::mail::delivery::MailDelivery;
+use crate::mail::delivery::{ComposedEmail, MailDelivery};
 use crate::web::middleware::Claims;
 use crate::web::router::AppState;
 
@@ -21,13 +21,71 @@ pub struct ListParams {
     pub search: Option<String>,
 }
 
+fn is_valid_mailbox_name(value: &str) -> bool {
+    matches!(value, "INBOX" | "Sent" | "Drafts" | "Trash" | "Spam")
+}
+
+fn is_valid_email_address(value: &str) -> bool {
+    let Some((local, domain)) = value.trim().split_once('@') else {
+        return false;
+    };
+
+    !local.is_empty()
+        && local.len() <= 64
+        && !local.contains(char::is_whitespace)
+        && domain.contains('.')
+        && domain.len() <= 253
+        && domain.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && label
+                    .bytes()
+                    .all(|ch| ch.is_ascii_alphanumeric() || ch == b'-')
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+        })
+}
+
+fn sanitize_attachment_filename(value: &str) -> String {
+    let cleaned: String = value
+        .chars()
+        .filter(|ch| !matches!(ch, '"' | '\\' | '\r' | '\n'))
+        .collect();
+    let cleaned = cleaned.trim();
+    if cleaned.is_empty() {
+        "attachment".to_string()
+    } else {
+        cleaned.to_string()
+    }
+}
+
+fn extend_unique_recipients(target: &mut Vec<String>, values: &[String]) {
+    for value in values {
+        if !target
+            .iter()
+            .any(|existing| existing.eq_ignore_ascii_case(value))
+        {
+            target.push(value.clone());
+        }
+    }
+}
+
+fn visible_recipients_json(to: &[String], cc: Option<&[String]>) -> String {
+    let mut visible = Vec::new();
+    extend_unique_recipients(&mut visible, to);
+    if let Some(cc) = cc {
+        extend_unique_recipients(&mut visible, cc);
+    }
+    serde_json::to_string(&visible).unwrap_or_default()
+}
+
 pub async fn list_emails(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<ListParams>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let page = params.page.unwrap_or(1).max(1);
-    let per_page = params.per_page.unwrap_or(50).min(100);
+    let per_page = params.per_page.unwrap_or(50).clamp(1, 100);
     let offset = (page - 1) * per_page;
 
     // If search query is provided, search across all mailboxes
@@ -51,6 +109,9 @@ pub async fn list_emails(
     }
 
     let mailbox = params.mailbox.unwrap_or_else(|| "INBOX".to_string());
+    if !is_valid_mailbox_name(&mailbox) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let emails = queries::get_emails_by_user(&state.db, claims.sub, &mailbox, per_page, offset)
         .await
@@ -145,6 +206,9 @@ pub async fn move_email(
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let mailbox = body["mailbox"].as_str().ok_or(StatusCode::BAD_REQUEST)?;
+    if !is_valid_mailbox_name(mailbox) {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
     let email = queries::get_email_by_id(&state.db, id)
         .await
@@ -167,9 +231,21 @@ pub async fn send_email(
     Extension(claims): Extension<Claims>,
     Json(payload): Json<SendEmailRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
+    if payload.to.is_empty() {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+
+    let sender = queries::get_user_by_id(&state.db, claims.sub)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::UNAUTHORIZED)?;
+    if sender.email != claims.email {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+
     let delivery = MailDelivery::new(state.config.clone(), state.db.clone());
 
-    // Combine to, cc, bcc for sending
+    // Combine to, cc, bcc for validation and envelope delivery.
     let mut all_recipients = payload.to.clone();
     if let Some(ref cc) = payload.cc {
         all_recipients.extend(cc.clone());
@@ -177,20 +253,29 @@ pub async fn send_email(
     if let Some(ref bcc) = payload.bcc {
         all_recipients.extend(bcc.clone());
     }
+    if all_recipients.is_empty()
+        || all_recipients
+            .iter()
+            .any(|recipient| !is_valid_email_address(recipient))
+    {
+        return Err(StatusCode::BAD_REQUEST);
+    }
 
-    delivery
-        .send_email(
-            &claims.email,
-            &all_recipients,
-            &payload.subject,
-            payload.body_text.as_deref(),
-            payload.body_html.as_deref(),
-        )
+    let sent_raw_message = delivery
+        .send_composed_email(ComposedEmail {
+            from: &claims.email,
+            to: &payload.to,
+            cc: payload.cc.as_deref().unwrap_or(&[]),
+            bcc: payload.bcc.as_deref().unwrap_or(&[]),
+            subject: &payload.subject,
+            body_text: payload.body_text.as_deref(),
+            body_html: payload.body_html.as_deref(),
+        })
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     // Also save to Sent mailbox
-    let recipients_json = serde_json::to_string(&payload.to).unwrap_or_default();
+    let recipients_json = visible_recipients_json(&payload.to, payload.cc.as_deref());
     let _ = queries::save_email(
         &state.db,
         None,
@@ -199,7 +284,7 @@ pub async fn send_email(
         Some(&payload.subject),
         payload.body_text.as_deref(),
         payload.body_html.as_deref(),
-        None,
+        Some(&sent_raw_message),
         claims.sub,
         "Sent",
     )
@@ -231,6 +316,7 @@ pub async fn download_attachment(
     let filename = attachment
         .filename
         .unwrap_or_else(|| "attachment".to_string());
+    let filename = sanitize_attachment_filename(&filename);
     let content_type = attachment
         .content_type
         .unwrap_or_else(|| "application/octet-stream".to_string());
@@ -262,4 +348,34 @@ pub async fn get_mailbox_counts(
     }
 
     Ok(Json(json!({ "mailboxes": mailbox_counts })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mailbox_names_are_limited_to_known_folders() {
+        assert!(is_valid_mailbox_name("INBOX"));
+        assert!(is_valid_mailbox_name("Trash"));
+        assert!(!is_valid_mailbox_name("../INBOX"));
+        assert!(!is_valid_mailbox_name("Archive"));
+    }
+
+    #[test]
+    fn attachment_filenames_are_header_safe() {
+        assert_eq!(sanitize_attachment_filename(" report.pdf "), "report.pdf");
+        assert_eq!(sanitize_attachment_filename("\"bad\r\n.txt"), "bad.txt");
+        assert_eq!(sanitize_attachment_filename("\r\n"), "attachment");
+    }
+
+    #[test]
+    fn sent_visible_recipients_include_cc_but_not_duplicates() {
+        let to = vec!["a@example.com".to_string()];
+        let cc = vec!["A@example.com".to_string(), "b@example.com".to_string()];
+        assert_eq!(
+            visible_recipients_json(&to, Some(&cc)),
+            r#"["a@example.com","b@example.com"]"#
+        );
+    }
 }

@@ -3,7 +3,7 @@ use tokio::io::BufReader;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
-use super::session::handle_smtp_session;
+use super::session::{SmtpSessionOptions, SmtpSessionResult, handle_smtp_session};
 use crate::config::Config;
 use crate::plugin::PluginManager;
 
@@ -51,29 +51,101 @@ impl SmtpServer {
         let db1 = db.clone();
         let plugins1 = self.plugins.clone();
         tokio::spawn(async move {
+            let smtp_starttls_acceptor =
+                match crate::tls::config::load_internal_tls_config(&config1.tls) {
+                    Ok(tls_config) => Some(crate::tls::config::create_tls_acceptor(tls_config)),
+                    Err(error) => {
+                        if config1.smtp.enable_starttls {
+                            warn!("SMTP STARTTLS disabled: {}", error);
+                        }
+                        None
+                    }
+                };
+
             loop {
                 match plain_listener.accept().await {
                     Ok((stream, addr)) => {
                         let config = config1.clone();
                         let db = db1.clone();
                         let plugins = plugins1.clone();
+                        let starttls_acceptor = smtp_starttls_acceptor.clone();
                         let peer_addr = addr.to_string();
                         tokio::spawn(async move {
                             info!("SMTP connection from {}", peer_addr);
-                            let (read_half, write_half) = tokio::io::split(stream);
+                            let (read_half, write_half) = stream.into_split();
                             let reader = BufReader::new(read_half);
-                            if let Err(e) = handle_smtp_session(
-                                reader,
-                                write_half,
-                                config,
-                                db,
-                                plugins,
-                                peer_addr.clone(),
-                                false,
+                            let mut reader = reader;
+                            let mut writer = write_half;
+                            match handle_smtp_session(
+                                &mut reader,
+                                &mut writer,
+                                config.clone(),
+                                db.clone(),
+                                plugins.clone(),
+                                SmtpSessionOptions::new(
+                                    peer_addr.clone(),
+                                    false,
+                                    true,
+                                    starttls_acceptor.is_some(),
+                                ),
                             )
                             .await
                             {
-                                error!("SMTP session error from {}: {}", peer_addr, e);
+                                Ok(SmtpSessionResult::Done) => {}
+                                Ok(SmtpSessionResult::StartTls) => {
+                                    let Some(acceptor) = starttls_acceptor else {
+                                        error!(
+                                            "SMTP STARTTLS requested from {} but acceptor is unavailable",
+                                            peer_addr
+                                        );
+                                        return;
+                                    };
+
+                                    let read_half = reader.into_inner();
+                                    match read_half.reunite(writer) {
+                                        Ok(stream) => match acceptor.accept(stream).await {
+                                            Ok(tls_stream) => {
+                                                let (read_half, write_half) =
+                                                    tokio::io::split(tls_stream);
+                                                let mut reader = BufReader::new(read_half);
+                                                let mut writer = write_half;
+                                                if let Err(error) = handle_smtp_session(
+                                                    &mut reader,
+                                                    &mut writer,
+                                                    config,
+                                                    db,
+                                                    plugins,
+                                                    SmtpSessionOptions::new(
+                                                        peer_addr.clone(),
+                                                        true,
+                                                        false,
+                                                        false,
+                                                    ),
+                                                )
+                                                .await
+                                                {
+                                                    error!(
+                                                        "SMTP post-STARTTLS session error from {}: {}",
+                                                        peer_addr, error
+                                                    );
+                                                }
+                                            }
+                                            Err(error) => {
+                                                error!(
+                                                    "SMTP STARTTLS handshake failed from {}: {}",
+                                                    peer_addr, error
+                                                );
+                                            }
+                                        },
+                                        Err(error) => {
+                                            error!(
+                                                "Failed to restore SMTP stream for STARTTLS from {}: {}",
+                                                peer_addr, error
+                                            );
+                                        }
+                                    }
+                                }
+                                Err(e) => error!("SMTP session error from {}: {}", peer_addr, e),
                             }
                         });
                     }
@@ -110,15 +182,20 @@ impl SmtpServer {
                                 match acceptor.accept(stream).await {
                                     Ok(tls_stream) => {
                                         let (read_half, write_half) = tokio::io::split(tls_stream);
-                                        let reader = BufReader::new(read_half);
+                                        let mut reader = BufReader::new(read_half);
+                                        let mut writer = write_half;
                                         if let Err(e) = handle_smtp_session(
-                                            reader,
-                                            write_half,
+                                            &mut reader,
+                                            &mut writer,
                                             config,
                                             db,
                                             plugins,
-                                            peer_addr.clone(),
-                                            true,
+                                            SmtpSessionOptions::new(
+                                                peer_addr.clone(),
+                                                true,
+                                                true,
+                                                false,
+                                            ),
                                         )
                                         .await
                                         {

@@ -388,7 +388,11 @@ async function addDomain() {
     message.value = '域名已添加'
     await loadDomains()
   } catch (err) {
-    error.value = err.message || '添加域名失败'
+    if (err.status === 400) {
+      error.value = '域名格式不正确，请输入类似 example.com 的域名'
+    } else {
+      error.value = err.message || '添加域名失败'
+    }
   } finally {
     saving.value = false
   }
@@ -404,7 +408,14 @@ async function deleteDomain(id, name) {
     domains.value = domains.value.filter((domain) => domain.id !== id)
     message.value = '域名已删除'
   } catch (err) {
-    error.value = err.message || '删除失败'
+    if (err.status === 409) {
+      error.value = '这个域名下还有用户，请先删除或迁移相关用户后再删除域名'
+    } else if (err.status === 404) {
+      error.value = '域名不存在或已被删除'
+      await loadDomains()
+    } else {
+      error.value = err.message || '删除失败'
+    }
   }
 }
 

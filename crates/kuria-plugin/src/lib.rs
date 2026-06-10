@@ -146,6 +146,7 @@ pub struct SmtpConnectArgs {
 pub struct SmtpFromArgs {
     pub sender: String,
     pub peer_addr: String,
+    pub is_tls: bool,
 }
 
 /// Safe args for `on_smtp_to`.
@@ -153,6 +154,7 @@ pub struct SmtpToArgs {
     pub recipient: String,
     pub sender: String,
     pub peer_addr: String,
+    pub is_tls: bool,
 }
 
 /// Safe args for `on_smtp_data`.
@@ -161,6 +163,7 @@ pub struct SmtpDataArgs {
     pub recipients: Vec<String>,
     pub raw_message: Vec<u8>,
     pub peer_addr: String,
+    pub is_tls: bool,
 }
 
 /// Safe args for `on_web_request`.
@@ -255,9 +258,14 @@ pub trait Plugin: Send + Sync {
 
 // ─── Helper Functions ───────────────────────────────────────────────────────
 
-/// Safely convert a C string pointer to a Rust String. Returns empty string
-/// if the pointer is null or contains invalid UTF-8.
-pub fn cstr_to_string(ptr: *const c_char) -> String {
+/// Convert a C string pointer to a Rust String. Returns empty string if the
+/// pointer is null or contains invalid UTF-8.
+///
+/// # Safety
+///
+/// `ptr` must be either null or a valid pointer to a NUL-terminated C string
+/// that remains alive for the duration of this call.
+pub unsafe fn cstr_to_string(ptr: *const c_char) -> String {
     if ptr.is_null() {
         return String::new();
     }
@@ -339,7 +347,13 @@ pub fn hook_result_to_c(result: HookResult) -> *mut CHookResult {
 }
 
 /// Free a `CHookResult` allocated by `hook_result_to_c`.
-pub fn free_c_hook_result(result: *mut CHookResult) {
+///
+/// # Safety
+///
+/// `result` must be null or a pointer returned by `hook_result_to_c` that has
+/// not already been freed. Its nested pointer fields must also be owned by the
+/// result according to this crate's allocation contract.
+pub unsafe fn free_c_hook_result(result: *mut CHookResult) {
     if result.is_null() {
         return;
     }
@@ -440,6 +454,7 @@ macro_rules! declare_plugin {
                         let smtp_args = $crate::SmtpFromArgs {
                             sender: $crate::cstr_to_string(a.sender),
                             peer_addr: $crate::cstr_to_string(a.peer_addr),
+                            is_tls: a.is_tls,
                         };
                         plugin.on_smtp_from(&smtp_args)
                     }
@@ -448,6 +463,7 @@ macro_rules! declare_plugin {
                             recipient: $crate::cstr_to_string(a.recipient),
                             sender: $crate::cstr_to_string(a.sender),
                             peer_addr: $crate::cstr_to_string(a.peer_addr),
+                            is_tls: a.is_tls,
                         };
                         plugin.on_smtp_to(&smtp_args)
                     }
@@ -470,6 +486,7 @@ macro_rules! declare_plugin {
                             recipients,
                             raw_message,
                             peer_addr: $crate::cstr_to_string(a.peer_addr),
+                            is_tls: a.is_tls,
                         };
                         plugin.on_smtp_data(&smtp_args)
                     }
@@ -489,7 +506,9 @@ macro_rules! declare_plugin {
         }
 
         extern "C" fn __kuria_free_result(result: *mut $crate::CHookResult) {
-            $crate::free_c_hook_result(result);
+            unsafe {
+                $crate::free_c_hook_result(result);
+            }
         }
 
         // Static plugin instance (leaked, lives for process lifetime).

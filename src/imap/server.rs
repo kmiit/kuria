@@ -2,7 +2,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::{error, info, warn};
 
-use super::session::handle_imap_connection;
+use super::session::{ImapSessionOptions, handle_imap_connection};
 use crate::config::Config;
 
 pub struct ImapServer {
@@ -89,14 +89,19 @@ impl ImapServer {
                                 match acceptor.accept(stream).await {
                                     Ok(tls_stream) => {
                                         let (read_half, write_half) = tokio::io::split(tls_stream);
-                                        let reader = tokio::io::BufReader::new(read_half);
+                                        let mut reader = tokio::io::BufReader::new(read_half);
+                                        let mut writer = write_half;
                                         if let Err(e) = super::session::handle_imap_session(
-                                            reader,
-                                            write_half,
+                                            &mut reader,
+                                            &mut writer,
                                             config,
                                             db,
-                                            peer_addr.clone(),
-                                            true,
+                                            ImapSessionOptions::new(
+                                                peer_addr.clone(),
+                                                true,
+                                                true,
+                                                false,
+                                            ),
                                         )
                                         .await
                                         {

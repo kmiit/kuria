@@ -23,8 +23,7 @@ pub struct PluginLoadError {
 /// A loaded plugin instance: holds the library handle (prevents unload) and vtable.
 struct PluginInstance {
     info: PluginInfo,
-    #[allow(dead_code)]
-    library: libloading::Library,
+    _library: libloading::Library,
     vtable: *const PluginVTable,
 }
 
@@ -123,7 +122,7 @@ impl PluginManager {
                     description,
                     path: path.to_string(),
                 },
-                library,
+                _library: library,
                 vtable,
             })
         }
@@ -208,10 +207,9 @@ impl PluginManager {
                 };
 
                 if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_CONNECT, &args)
+                    && result.reject
                 {
-                    if result.reject {
-                        return Some(result);
-                    }
+                    return Some(result);
                 }
             }
         }
@@ -219,7 +217,12 @@ impl PluginManager {
     }
 
     /// Call `on_smtp_from` for all plugins. Returns the first rejection, if any.
-    pub fn call_smtp_from(&self, sender: &str, peer_addr: &str) -> Option<HookResult> {
+    pub fn call_smtp_from(
+        &self,
+        sender: &str,
+        peer_addr: &str,
+        is_tls: bool,
+    ) -> Option<HookResult> {
         let sender_cstr = CString::new(sender).unwrap_or_default();
         let peer_cstr = CString::new(peer_addr).unwrap_or_default();
 
@@ -227,7 +230,7 @@ impl PluginManager {
             unsafe {
                 let args = CHookArgs {
                     peer_addr: peer_cstr.as_ptr(),
-                    is_tls: false,
+                    is_tls,
                     sender: sender_cstr.as_ptr(),
                     recipient: std::ptr::null(),
                     recipients: std::ptr::null(),
@@ -241,10 +244,10 @@ impl PluginManager {
                     query: std::ptr::null(),
                 };
 
-                if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_FROM, &args) {
-                    if result.reject {
-                        return Some(result);
-                    }
+                if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_FROM, &args)
+                    && result.reject
+                {
+                    return Some(result);
                 }
             }
         }
@@ -257,6 +260,7 @@ impl PluginManager {
         recipient: &str,
         sender: &str,
         peer_addr: &str,
+        is_tls: bool,
     ) -> Option<HookResult> {
         let rcpt_cstr = CString::new(recipient).unwrap_or_default();
         let sender_cstr = CString::new(sender).unwrap_or_default();
@@ -266,7 +270,7 @@ impl PluginManager {
             unsafe {
                 let args = CHookArgs {
                     peer_addr: peer_cstr.as_ptr(),
-                    is_tls: false,
+                    is_tls,
                     sender: sender_cstr.as_ptr(),
                     recipient: rcpt_cstr.as_ptr(),
                     recipients: std::ptr::null(),
@@ -280,10 +284,10 @@ impl PluginManager {
                     query: std::ptr::null(),
                 };
 
-                if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_TO, &args) {
-                    if result.reject {
-                        return Some(result);
-                    }
+                if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_TO, &args)
+                    && result.reject
+                {
+                    return Some(result);
                 }
             }
         }
@@ -297,6 +301,7 @@ impl PluginManager {
         recipients: &[String],
         raw_message: &[u8],
         peer_addr: &str,
+        is_tls: bool,
     ) -> Option<HookResult> {
         let sender_cstr = CString::new(sender).unwrap_or_default();
         let peer_cstr = CString::new(peer_addr).unwrap_or_default();
@@ -313,7 +318,7 @@ impl PluginManager {
             unsafe {
                 let args = CHookArgs {
                     peer_addr: peer_cstr.as_ptr(),
-                    is_tls: false,
+                    is_tls,
                     sender: sender_cstr.as_ptr(),
                     recipient: std::ptr::null(),
                     recipients: rcpt_ptrs.as_ptr(),
@@ -327,10 +332,10 @@ impl PluginManager {
                     query: std::ptr::null(),
                 };
 
-                if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_DATA, &args) {
-                    if result.reject || result.action == kuria_plugin::ACTION_MODIFIED {
-                        return Some(result);
-                    }
+                if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_DATA, &args)
+                    && result.is_effective_smtp_data_result()
+                {
+                    return Some(result);
                 }
             }
         }
@@ -369,10 +374,9 @@ impl PluginManager {
                 };
 
                 if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_WEB_REQUEST, &args)
+                    && result.reject
                 {
-                    if result.reject {
-                        return Some(result);
-                    }
+                    return Some(result);
                 }
             }
         }
@@ -408,6 +412,16 @@ pub struct HookResult {
     pub modified_message: Option<Vec<u8>>,
     pub set_headers: Vec<(String, String)>,
     pub mailbox: Option<String>,
+}
+
+impl HookResult {
+    fn is_effective_smtp_data_result(&self) -> bool {
+        self.reject
+            || self.action == kuria_plugin::ACTION_MODIFIED
+            || self.modified_message.is_some()
+            || !self.set_headers.is_empty()
+            || self.mailbox.is_some()
+    }
 }
 
 /// Convert a C `CHookResult` to a safe Rust `HookResult`. Copies all data so
@@ -460,5 +474,36 @@ unsafe fn read_cstr(ptr: *const std::os::raw::c_char) -> Option<String> {
             .to_str()
             .ok()
             .map(|s| s.to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn smtp_data_results_are_effective_when_they_change_delivery() {
+        let mut result = HookResult {
+            action: kuria_plugin::ACTION_ACCEPT,
+            reject: false,
+            reject_message: None,
+            modified_message: None,
+            set_headers: Vec::new(),
+            mailbox: None,
+        };
+        assert!(!result.is_effective_smtp_data_result());
+
+        result
+            .set_headers
+            .push(("X-Test".to_string(), "ok".to_string()));
+        assert!(result.is_effective_smtp_data_result());
+
+        result.set_headers.clear();
+        result.mailbox = Some("Spam".to_string());
+        assert!(result.is_effective_smtp_data_result());
+
+        result.mailbox = None;
+        result.modified_message = Some(b"message".to_vec());
+        assert!(result.is_effective_smtp_data_result());
     }
 }

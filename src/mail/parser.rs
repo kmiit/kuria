@@ -6,6 +6,12 @@ pub fn parse_email(raw: &[u8]) -> anyhow::Result<ParsedEmail> {
         .parse(raw)
         .ok_or_else(|| anyhow::anyhow!("Failed to parse email"))?;
 
+    let from_address = message
+        .from()
+        .and_then(|f| f.first())
+        .and_then(|a| a.address())
+        .map(str::to_ascii_lowercase);
+
     let sender = message
         .from()
         .and_then(|f| f.first())
@@ -38,7 +44,6 @@ pub fn parse_email(raw: &[u8]) -> anyhow::Result<ParsedEmail> {
             content_type: att
                 .content_type()
                 .map(|ct| format!("{}/{}", ct.ctype(), ct.subtype().unwrap_or("octet-stream"))),
-            size: att.len(),
             data: att.contents().to_vec(),
         })
         .collect();
@@ -50,21 +55,20 @@ pub fn parse_email(raw: &[u8]) -> anyhow::Result<ParsedEmail> {
         body_text,
         body_html,
         message_id,
+        from_address,
         attachments,
     })
 }
 
 #[derive(Debug)]
 pub struct ParsedEmail {
-    #[allow(dead_code)]
     pub sender: String,
-    #[allow(dead_code)]
     pub recipients: Vec<String>,
     pub subject: Option<String>,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
-    #[allow(dead_code)]
     pub message_id: Option<String>,
+    pub from_address: Option<String>,
     pub attachments: Vec<AttachmentInfo>,
 }
 
@@ -72,7 +76,20 @@ pub struct ParsedEmail {
 pub struct AttachmentInfo {
     pub filename: Option<String>,
     pub content_type: Option<String>,
-    #[allow(dead_code)]
-    pub size: usize,
     pub data: Vec<u8>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_email_extracts_lowercase_from_address() {
+        let parsed = parse_email(
+            b"From: User <User@Example.COM>\r\nTo: dest@example.com\r\nSubject: Hi\r\n\r\nBody",
+        )
+        .expect("parsed");
+
+        assert_eq!(parsed.from_address.as_deref(), Some("user@example.com"));
+    }
 }

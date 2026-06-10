@@ -37,7 +37,7 @@ const authResults = computed(() => {
   if (!email.value) return []
   return [
     { label: 'SPF', value: email.value.spf_result },
-    { label: 'DKIM', value: email.value.dkim_signature ? 'pass' : '' },
+    { label: 'DKIM', value: email.value.dkim_signature },
     { label: 'DMARC', value: email.value.dmarc_result },
   ].filter((item) => item.value)
 })
@@ -114,16 +114,21 @@ function forwardEmail() {
   router.push({ path: '/compose', query: { forward: email.value?.id } })
 }
 
-function downloadAttachment(att) {
-  const token = localStorage.getItem('token')
-  const url = api.getAttachmentUrl(att.id)
-  const a = document.createElement('a')
-  a.href = url + '?token=' + token
-  a.download = att.filename || 'attachment'
-  a.target = '_blank'
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
+async function downloadAttachment(att) {
+  actionMessage.value = ''
+  try {
+    const blob = await api.downloadAttachment(att.id)
+    const blobUrl = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = blobUrl
+    a.download = att.filename || 'attachment'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    URL.revokeObjectURL(blobUrl)
+  } catch (e) {
+    actionMessage.value = e.message || '下载附件失败'
+  }
 }
 
 onMounted(loadEmail)

@@ -9,30 +9,48 @@ use crate::db::queries;
 use crate::web::middleware::Claims;
 use crate::web::router::AppState;
 
+fn normalize_login_email(value: &str) -> String {
+    value.trim().to_ascii_lowercase()
+}
+
+pub fn jwt_expiration_24h() -> Result<usize, StatusCode> {
+    chrono::Utc::now()
+        .checked_add_signed(chrono::Duration::hours(24))
+        .map(|expires| expires.timestamp() as usize)
+        .ok_or(StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 pub async fn login(
     State(state): State<AppState>,
     Json(payload): Json<LoginRequest>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    let user = queries::get_user_by_email(&state.db, &payload.email)
+    let email = normalize_login_email(&payload.email);
+    if state.login_rate_limiter.is_limited(&email) {
+        return Err(StatusCode::TOO_MANY_REQUESTS);
+    }
+
+    let Some(user) = queries::get_user_by_email(&state.db, &email)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .ok_or(StatusCode::UNAUTHORIZED)?;
+    else {
+        state.login_rate_limiter.record_failure(&email);
+        return Err(StatusCode::UNAUTHORIZED);
+    };
 
     let valid = verify(&payload.password, &user.password_hash)
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if !valid {
+        state.login_rate_limiter.record_failure(&email);
         return Err(StatusCode::UNAUTHORIZED);
     }
+    state.login_rate_limiter.record_success(&email);
 
     let claims = Claims {
         sub: user.id,
         email: user.email.clone(),
         is_admin: user.is_admin,
-        exp: chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::hours(24))
-            .unwrap()
-            .timestamp() as usize,
+        exp: jwt_expiration_24h()?,
     };
 
     let mut header = Header::new(Algorithm::HS256);
@@ -56,4 +74,24 @@ pub async fn login(
             "is_admin": user.is_admin,
         }
     })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn login_email_is_normalized() {
+        assert_eq!(
+            normalize_login_email(" User@Example.COM "),
+            "user@example.com"
+        );
+    }
+
+    #[test]
+    fn jwt_expiration_is_in_the_future() {
+        assert!(
+            jwt_expiration_24h().expect("expiration") > chrono::Utc::now().timestamp() as usize
+        );
+    }
 }

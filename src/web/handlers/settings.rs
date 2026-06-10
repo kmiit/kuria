@@ -127,10 +127,18 @@ pub struct SetupRequest {
 }
 
 fn normalize_domain(value: &str) -> String {
+    let value = value.trim();
+    let lower = value.to_ascii_lowercase();
+    let value = if lower.starts_with("http://") {
+        &value[7..]
+    } else if lower.starts_with("https://") {
+        &value[8..]
+    } else {
+        value
+    };
+
     value
         .trim()
-        .trim_start_matches("http://")
-        .trim_start_matches("https://")
         .split('/')
         .next()
         .unwrap_or("")
@@ -281,10 +289,7 @@ pub async fn run_setup(
         sub: user.id,
         email: user.email.clone(),
         is_admin: user.is_admin,
-        exp: chrono::Utc::now()
-            .checked_add_signed(chrono::Duration::hours(24))
-            .unwrap()
-            .timestamp() as usize,
+        exp: crate::web::handlers::auth::jwt_expiration_24h()?,
     };
 
     let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);

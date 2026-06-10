@@ -67,6 +67,7 @@ function toggleVisible() {
     <span class="password-input__trailing">
       <MiuixIconButton
         class="password-input__toggle"
+        type="button"
         :aria-label="toggleLabel"
         :aria-pressed="visible"
         :title="toggleLabel"
