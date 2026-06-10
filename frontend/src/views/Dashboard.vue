@@ -35,9 +35,9 @@ const mailboxSummary = computed(() =>
 )
 
 const serviceCards = computed(() => [
-  { name: 'SMTP 服务', detail: `端口 ${settings.value?.smtp_port || 25}`, status: '运行中' },
-  { name: 'IMAP 服务', detail: `端口 ${settings.value?.imap_port || 143}`, status: '运行中' },
-  { name: 'POP3 服务', detail: `端口 ${settings.value?.pop3_port || 110}`, status: '运行中' },
+  { name: 'SMTP 服务', detail: `端口 ${settings.value?.smtp_port || 25}`, status: settings.value?.smtp_running ? '运行中' : '已停止' },
+  { name: 'IMAP 服务', detail: `端口 ${settings.value?.imap_port || 143}`, status: settings.value?.imap_running ? '运行中' : '已停止' },
+  { name: 'POP3 服务', detail: `端口 ${settings.value?.pop3_port || 110}`, status: settings.value?.pop3_running ? '运行中' : '已停止' },
   { name: 'Web 服务', detail: `端口 ${settings.value?.web_port || 8080}`, status: '运行中' },
 ])
 
@@ -185,7 +185,7 @@ onMounted(loadDashboard)
       <div v-if="settings" class="services-status">
         <MiuixCard v-for="service in serviceCards" :key="service.name">
           <div class="card-inner service-card">
-            <div class="service-dot"></div>
+            <div class="service-dot" :class="{ stopped: service.status === '已停止' }"></div>
             <div class="service-info">
               <div class="service-name">{{ service.name }}</div>
               <div class="service-detail">{{ service.detail }} - {{ service.status }}</div>
@@ -384,6 +384,11 @@ onMounted(loadDashboard)
   background: var(--app-success);
   box-shadow: 0 0 0 5px color-mix(in srgb, var(--app-success) 18%, transparent);
   flex-shrink: 0;
+}
+
+.service-dot.stopped {
+  background: var(--app-error);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--app-error) 18%, transparent);
 }
 
 .service-name {
