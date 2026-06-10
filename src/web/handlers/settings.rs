@@ -132,6 +132,7 @@ pub struct SetupRequest {
     pub imap_port: Option<u16>,
     pub pop3_port: Option<u16>,
     pub web_port: Option<u16>,
+    pub jwt_secret: Option<String>,
 }
 
 fn normalize_domain(value: &str) -> String {
@@ -318,6 +319,10 @@ pub async fn run_setup(
     // Save config.toml with updated settings
     save_config_file(&payload, &state.config).await.ok();
 
+    // Reload config to get the new JWT secret
+    let new_config = crate::config::Config::load("config.toml")
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     // Start mail services dynamically
     start_mail_services(&state).await;
 
@@ -335,7 +340,7 @@ pub async fn run_setup(
     let token = jsonwebtoken::encode(
         &header,
         &claims,
-        &jsonwebtoken::EncodingKey::from_secret(state.config.web.jwt_secret.as_bytes()),
+        &jsonwebtoken::EncodingKey::from_secret(new_config.web.jwt_secret.as_bytes()),
     )
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
@@ -830,6 +835,15 @@ async fn save_config_file(payload: &SetupRequest, base_config: &crate::config::C
     if let Some(port) = payload.web_port {
         config.web.listen_addr = format!("0.0.0.0:{}", port);
     }
+    if let Some(secret) = &payload.jwt_secret {
+        if !secret.is_empty() {
+            config.web.jwt_secret = secret.clone();
+        }
+    } else {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        config.web.jwt_secret = format!("kuria-{:x}-{}", timestamp, std::process::id());
+    }
 
     if payload.use_nginx_proxy.unwrap_or(false) {
         config.tls.mode = TlsMode::External;
@@ -860,103 +874,109 @@ async fn start_mail_services(state: &AppState) {
 
     // Start SMTP
     let smtp_listener = match tokio::net::TcpListener::bind(&config.smtp.listen_addr).await {
-        Ok(l) => l,
+        Ok(l) => Some(l),
         Err(e) => {
             tracing::error!("Failed to bind SMTP port {}: {}", config.smtp.listen_addr, e);
-            return;
+            None
         }
     };
 
-    let smtps_listener = if !crate::mail_services::listener_disabled(&config.smtp.listen_addr_tls) && internal_tls.is_enabled() {
-        match tokio::net::TcpListener::bind(&config.smtp.listen_addr_tls).await {
-            Ok(l) => Some(l),
-            Err(e) => {
-                tracing::warn!("Failed to bind SMTPS port {}: {}", config.smtp.listen_addr_tls, e);
-                None
+    if let Some(smtp_listener) = smtp_listener {
+        let smtps_listener = if !crate::mail_services::listener_disabled(&config.smtp.listen_addr_tls) && internal_tls.is_enabled() {
+            match tokio::net::TcpListener::bind(&config.smtp.listen_addr_tls).await {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    tracing::warn!("Failed to bind SMTPS port {}: {}", config.smtp.listen_addr_tls, e);
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
-    let smtp_config = config.clone();
-    let smtp_db = state.db.clone();
-    let smtp_plugins = state.plugins.clone();
-    let smtp_running = state.mail_services.smtp_running.clone();
-    tokio::spawn(async move {
-        *smtp_running.write().await = true;
-        let server = crate::smtp::server::SmtpServer::new(smtp_config, smtp_db, smtp_plugins);
-        if let Err(e) = server.start_with_listeners(smtp_listener, smtps_listener).await {
-            tracing::error!("SMTP server error: {}", e);
-        }
-        *smtp_running.write().await = false;
-    });
+        let smtp_config = config.clone();
+        let smtp_db = state.db.clone();
+        let smtp_plugins = state.plugins.clone();
+        let smtp_running = state.mail_services.smtp_running.clone();
+        tokio::spawn(async move {
+            *smtp_running.write().await = true;
+            let server = crate::smtp::server::SmtpServer::new(smtp_config, smtp_db, smtp_plugins);
+            if let Err(e) = server.start_with_listeners(smtp_listener, smtps_listener).await {
+                tracing::error!("SMTP server error: {}", e);
+            }
+            *smtp_running.write().await = false;
+        });
+    }
 
     // Start IMAP
     let imap_listener = match tokio::net::TcpListener::bind(&config.imap.listen_addr).await {
-        Ok(l) => l,
+        Ok(l) => Some(l),
         Err(e) => {
             tracing::error!("Failed to bind IMAP port {}: {}", config.imap.listen_addr, e);
-            return;
+            None
         }
     };
 
-    let imaps_listener = if !crate::mail_services::listener_disabled(&config.imap.listen_addr_tls) && internal_tls.is_enabled() {
-        match tokio::net::TcpListener::bind(&config.imap.listen_addr_tls).await {
-            Ok(l) => Some(l),
-            Err(e) => {
-                tracing::warn!("Failed to bind IMAPS port {}: {}", config.imap.listen_addr_tls, e);
-                None
+    if let Some(imap_listener) = imap_listener {
+        let imaps_listener = if !crate::mail_services::listener_disabled(&config.imap.listen_addr_tls) && internal_tls.is_enabled() {
+            match tokio::net::TcpListener::bind(&config.imap.listen_addr_tls).await {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    tracing::warn!("Failed to bind IMAPS port {}: {}", config.imap.listen_addr_tls, e);
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
-    let imap_config = config.clone();
-    let imap_db = state.db.clone();
-    let imap_running = state.mail_services.imap_running.clone();
-    tokio::spawn(async move {
-        *imap_running.write().await = true;
-        let server = crate::imap::server::ImapServer::new(imap_config, imap_db);
-        if let Err(e) = server.start_with_listeners(imap_listener, imaps_listener).await {
-            tracing::error!("IMAP server error: {}", e);
-        }
-        *imap_running.write().await = false;
-    });
+        let imap_config = config.clone();
+        let imap_db = state.db.clone();
+        let imap_running = state.mail_services.imap_running.clone();
+        tokio::spawn(async move {
+            *imap_running.write().await = true;
+            let server = crate::imap::server::ImapServer::new(imap_config, imap_db);
+            if let Err(e) = server.start_with_listeners(imap_listener, imaps_listener).await {
+                tracing::error!("IMAP server error: {}", e);
+            }
+            *imap_running.write().await = false;
+        });
+    }
 
     // Start POP3
     let pop3_listener = match tokio::net::TcpListener::bind(&config.pop3.listen_addr).await {
-        Ok(l) => l,
+        Ok(l) => Some(l),
         Err(e) => {
             tracing::error!("Failed to bind POP3 port {}: {}", config.pop3.listen_addr, e);
-            return;
+            None
         }
     };
 
-    let pop3s_listener = if !crate::mail_services::listener_disabled(&config.pop3.listen_addr_tls) && internal_tls.is_enabled() {
-        match tokio::net::TcpListener::bind(&config.pop3.listen_addr_tls).await {
-            Ok(l) => Some(l),
-            Err(e) => {
-                tracing::warn!("Failed to bind POP3S port {}: {}", config.pop3.listen_addr_tls, e);
-                None
+    if let Some(pop3_listener) = pop3_listener {
+        let pop3s_listener = if !crate::mail_services::listener_disabled(&config.pop3.listen_addr_tls) && internal_tls.is_enabled() {
+            match tokio::net::TcpListener::bind(&config.pop3.listen_addr_tls).await {
+                Ok(l) => Some(l),
+                Err(e) => {
+                    tracing::warn!("Failed to bind POP3S port {}: {}", config.pop3.listen_addr_tls, e);
+                    None
+                }
             }
-        }
-    } else {
-        None
-    };
+        } else {
+            None
+        };
 
-    let pop3_config = config.clone();
-    let pop3_db = state.db.clone();
-    let pop3_running = state.mail_services.pop3_running.clone();
-    tokio::spawn(async move {
-        *pop3_running.write().await = true;
-        let server = crate::pop3::server::Pop3Server::new(pop3_config, pop3_db);
-        if let Err(e) = server.start_with_listeners(pop3_listener, pop3s_listener).await {
-            tracing::error!("POP3 server error: {}", e);
-        }
-        *pop3_running.write().await = false;
-    });
+        let pop3_config = config.clone();
+        let pop3_db = state.db.clone();
+        let pop3_running = state.mail_services.pop3_running.clone();
+        tokio::spawn(async move {
+            *pop3_running.write().await = true;
+            let server = crate::pop3::server::Pop3Server::new(pop3_config, pop3_db);
+            if let Err(e) = server.start_with_listeners(pop3_listener, pop3s_listener).await {
+                tracing::error!("POP3 server error: {}", e);
+            }
+            *pop3_running.write().await = false;
+        });
+    }
 
     tracing::info!("Mail services started dynamically");
 }
