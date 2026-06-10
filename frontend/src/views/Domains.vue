@@ -147,7 +147,7 @@ function quoteTxt(value) {
 }
 
 function zoneLine(domain, host, type, value) {
-  return `${relativeHost(host, domain.domain_name)} 3600 IN ${type} ${value}`
+  return `${relativeHost(host, domain.domain_name)} 3600 IN ${type} ${value} ; kuria`
 }
 
 function spfValue(domain) {
