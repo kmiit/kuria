@@ -1,5 +1,8 @@
-use axum::http::StatusCode;
-use axum::{Extension, Json, extract::State};
+use axum::body::{Body, to_bytes};
+use axum::extract::{Path, Request, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
+use axum::response::Response;
+use axum::{Extension, Json};
 use serde::Deserialize;
 use serde_json::json;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
@@ -360,6 +363,197 @@ pub async fn get_plugins(
     }
 
     Ok(Json(plugin_status(&state)))
+}
+
+pub async fn plugin_api(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path((plugin, path)): Path<(String, String)>,
+    request: Request,
+) -> Result<Response, StatusCode> {
+    let method = request.method().to_string();
+    let query = request.uri().query().unwrap_or("").to_string();
+    let headers_json = request_headers_json(request.headers());
+    let user_json =
+        serde_json::to_string(&claims).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let path = if path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", path.trim_start_matches('/'))
+    };
+    let body = to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body_json = if body.is_empty() {
+        "{}".to_string()
+    } else {
+        String::from_utf8(body.to_vec()).map_err(|_| StatusCode::BAD_REQUEST)?
+    };
+
+    let response = state
+        .plugins
+        .call_plugin_api(
+            &plugin,
+            &method,
+            &path,
+            &headers_json,
+            &query,
+            &body_json,
+            &user_json,
+        )
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let status = StatusCode::from_u16(response.status_code).unwrap_or(StatusCode::OK);
+    let mut response = Response::new(Body::from(response.body_json));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    Ok(response)
+}
+
+pub async fn plugin_asset(
+    State(state): State<AppState>,
+    Path((plugin, path)): Path<(String, String)>,
+) -> Result<Response, StatusCode> {
+    let plugin_response = state
+        .plugins
+        .call_plugin_admin_asset(&plugin, &path)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let status = StatusCode::from_u16(plugin_response.status_code).unwrap_or(StatusCode::OK);
+    let content_type = plugin_asset_content_type(&path);
+    let cache_control = if content_type == "text/html; charset=utf-8" {
+        "no-store"
+    } else {
+        "public, max-age=300"
+    };
+
+    Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, content_type)
+        .header(header::CACHE_CONTROL, cache_control)
+        .body(Body::from(plugin_response.body_json))
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
+pub async fn plugin_webhook(
+    State(state): State<AppState>,
+    Path((plugin, path)): Path<(String, String)>,
+    request: Request,
+) -> Result<Response, StatusCode> {
+    let method = request.method().to_string();
+    let query = request.uri().query().unwrap_or("").to_string();
+    let headers_json = request_headers_json(request.headers());
+    let path = if path.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", path.trim_start_matches('/'))
+    };
+    let body = to_bytes(request.into_body(), 1024 * 1024)
+        .await
+        .map_err(|_| StatusCode::BAD_REQUEST)?;
+    let body_json = if body.is_empty() {
+        "{}".to_string()
+    } else {
+        String::from_utf8(body.to_vec()).map_err(|_| StatusCode::BAD_REQUEST)?
+    };
+
+    let plugin_response = state
+        .plugins
+        .call_plugin_webhook(&plugin, &method, &path, &headers_json, &query, &body_json)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    let status = StatusCode::from_u16(plugin_response.status_code).unwrap_or(StatusCode::OK);
+    let body_json = plugin_response.body_json;
+
+    if status.is_success() {
+        send_plugin_outbound_emails(&state, &body_json).await;
+    }
+
+    let mut response = Response::new(Body::from(body_json));
+    *response.status_mut() = status;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    Ok(response)
+}
+
+async fn send_plugin_outbound_emails(state: &AppState, body_json: &str) {
+    let Ok(response) =
+        serde_json::from_str::<crate::plugin::PluginOutboundEmailResponse>(body_json)
+    else {
+        tracing::warn!("Plugin webhook returned non-standard JSON response");
+        return;
+    };
+
+    if response.outbound_emails.is_empty() {
+        return;
+    }
+
+    let delivery = crate::mail::delivery::MailDelivery::with_plugins(
+        state.config.clone(),
+        state.db.clone(),
+        state.plugins.clone(),
+    );
+    for email in response.outbound_emails {
+        if email.from.trim().is_empty() || email.to.is_empty() || email.subject.trim().is_empty() {
+            tracing::warn!("Plugin webhook returned an invalid outbound email");
+            continue;
+        }
+
+        if let Err(error) = delivery
+            .send_composed_email(crate::mail::delivery::ComposedEmail {
+                from: &email.from,
+                to: &email.to,
+                cc: &email.cc,
+                bcc: &email.bcc,
+                subject: &email.subject,
+                body_text: email.body_text.as_deref(),
+                body_html: email.body_html.as_deref(),
+                attachments: &[],
+            })
+            .await
+        {
+            tracing::warn!("Failed to send plugin outbound email: {}", error);
+        }
+    }
+}
+
+fn request_headers_json(headers: &HeaderMap) -> String {
+    let headers_map: serde_json::Map<String, serde_json::Value> = headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value.to_str().ok().map(|value| {
+                (
+                    name.to_string(),
+                    serde_json::Value::String(value.to_string()),
+                )
+            })
+        })
+        .collect();
+    serde_json::to_string(&headers_map).unwrap_or_default()
+}
+
+fn plugin_asset_content_type(path: &str) -> &'static str {
+    let extension = std::path::Path::new(path)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+
+    match extension.as_str() {
+        "html" => "text/html; charset=utf-8",
+        "js" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "json" => "application/json; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "wasm" => "application/wasm",
+        _ => "text/html; charset=utf-8",
+    }
 }
 
 fn plugin_status(state: &AppState) -> serde_json::Value {

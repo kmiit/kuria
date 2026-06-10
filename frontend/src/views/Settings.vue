@@ -174,6 +174,11 @@ function queueStatusLabel(status) {
   return queueStatusOptions.find((item) => item.value === status)?.label || status
 }
 
+function pluginConfigRoute(plugin) {
+  if (!plugin?.admin_path) return null
+  return { name: 'plugin-config', params: { plugin: plugin.name } }
+}
+
 function formatRecipients(recipients) {
   return Array.isArray(recipients) ? recipients.join(', ') : ''
 }
@@ -279,13 +284,28 @@ onMounted(async () => {
             </div>
 
             <div v-if="plugins?.loaded?.length" class="plugin-list">
-              <div v-for="plugin in plugins.loaded" :key="plugin.path" class="plugin-item">
+              <div v-for="plugin in plugins.loaded" :key="plugin.name" class="plugin-item">
                 <div class="plugin-main">
-                  <div class="plugin-name">{{ plugin.name }}</div>
+                  <div class="plugin-title-row">
+                    <div class="plugin-name">{{ plugin.name }}</div>
+                    <span v-if="plugin.version" class="version-tag">v{{ plugin.version }}</span>
+                  </div>
                   <div class="plugin-desc">{{ plugin.description || '无描述' }}</div>
-                  <code>{{ plugin.path }}</code>
+                  <div class="plugin-meta">
+                    <span class="plugin-status-dot active"></span>
+                    <span>已加载</span>
+                    <span v-if="plugin.admin_path">可配置</span>
+                  </div>
                 </div>
-                <span v-if="plugin.version" class="version-tag">v{{ plugin.version }}</span>
+                <div class="plugin-actions">
+                  <router-link
+                    v-if="pluginConfigRoute(plugin)"
+                    class="plugin-config-link"
+                    :to="pluginConfigRoute(plugin)"
+                  >
+                    配置
+                  </router-link>
+                </div>
               </div>
             </div>
 
@@ -293,15 +313,9 @@ onMounted(async () => {
               {{ plugins.enabled ? '插件系统已启用，但当前没有成功加载的插件。' : '插件系统未启用。' }}
             </div>
 
-            <div v-if="plugins?.configured_paths?.length" class="path-list">
-              <h3>配置路径</h3>
-              <code v-for="path in plugins.configured_paths" :key="path">{{ path }}</code>
-            </div>
-
             <div v-if="plugins?.load_errors?.length" class="plugin-errors">
               <h3>加载失败</h3>
               <div v-for="item in plugins.load_errors" :key="item.path" class="plugin-error">
-                <code>{{ item.path }}</code>
                 <span>{{ item.error }}</span>
               </div>
             </div>
@@ -623,6 +637,12 @@ onMounted(async () => {
   min-width: 0;
 }
 
+.plugin-title-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
 .plugin-name {
   font-size: 15px;
   font-weight: 700;
@@ -635,7 +655,41 @@ onMounted(async () => {
   color: var(--m-color-text-secondary);
 }
 
-.plugin-item code,
+.plugin-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin-top: 9px;
+  color: var(--m-color-text-secondary);
+  font-size: 12px;
+}
+
+.plugin-meta span:not(.plugin-status-dot) {
+  padding: 3px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--m-color-text-secondary) 10%, transparent);
+}
+
+.plugin-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--m-color-text-secondary);
+}
+
+.plugin-status-dot.active {
+  background: var(--app-success);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--app-success) 14%, transparent);
+}
+
+.plugin-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 8px;
+}
+
 .path-list code,
 .plugin-error code {
   display: block;
@@ -653,6 +707,23 @@ onMounted(async () => {
   font-size: 12px;
   color: var(--app-info);
   background: color-mix(in srgb, var(--app-info) 12%, transparent);
+}
+
+.plugin-config-link {
+  flex-shrink: 0;
+  min-height: 28px;
+  padding: 5px 10px;
+  border-radius: var(--app-radius);
+  color: var(--m-color-primary);
+  background: color-mix(in srgb, var(--m-color-primary) 10%, transparent);
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 18px;
+  text-decoration: none;
+}
+
+.plugin-config-link:hover {
+  background: color-mix(in srgb, var(--m-color-primary) 16%, transparent);
 }
 
 .plugin-empty {
@@ -836,6 +907,11 @@ onMounted(async () => {
     align-items: stretch;
     grid-template-columns: 1fr;
     flex-direction: column;
+  }
+
+  .plugin-actions {
+    align-items: center;
+    justify-content: flex-start;
   }
 
   .queue-actions {

@@ -54,9 +54,9 @@ key_size = 2048
 selector = "kuria"
 
 [plugins]
-# 是否启用插件系统
-enabled = false
-# 插件目录 (可选, 用于自动发现)
-# directory = "./plugins"
-# 插件路径列表
-paths = []
+# Enable external dynamic-library plugins.
+enabled = true
+# Directory scanned for platform dynamic libraries (.dll/.so/.dylib).
+directory = "./plugins"
+# Explicit plugin library paths, in addition to directory discovery.
+# paths = ["./plugins/custom_plugin.dll"]

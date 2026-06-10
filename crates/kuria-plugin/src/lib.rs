@@ -9,6 +9,7 @@
 //! ```rust,no_run
 //! use kuria_plugin::*;
 //!
+//! #[derive(Default)]
 //! struct MyPlugin;
 //!
 //! impl Plugin for MyPlugin {
@@ -39,7 +40,7 @@ use std::os::raw::c_char;
 // ─── ABI Version ────────────────────────────────────────────────────────────
 
 /// Current plugin ABI version. Bump when the repr(C) layout changes.
-pub const PLUGIN_ABI_VERSION: u32 = 1;
+pub const PLUGIN_ABI_VERSION: u32 = 2;
 
 // ─── Hook IDs ───────────────────────────────────────────────────────────────
 
@@ -50,6 +51,9 @@ pub const ON_SMTP_FROM: u32 = 11;
 pub const ON_SMTP_TO: u32 = 12;
 pub const ON_SMTP_DATA: u32 = 13;
 pub const ON_WEB_REQUEST: u32 = 20;
+pub const ON_PLUGIN_API: u32 = 21;
+pub const ON_PLUGIN_WEBHOOK: u32 = 22;
+pub const ON_MAIL_DELIVERED: u32 = 30;
 
 // ─── Action Codes ───────────────────────────────────────────────────────────
 
@@ -94,6 +98,9 @@ pub struct CHookArgs {
     pub path: *const c_char,
     pub headers_json: *const c_char,
     pub query: *const c_char,
+    pub body_json: *const c_char,
+    pub user_json: *const c_char,
+    pub event_json: *const c_char,
 }
 
 /// Result returned by a hook. The plugin allocates string/byte fields via
@@ -109,6 +116,8 @@ pub struct CHookResult {
     pub set_headers: *mut CHeaderEntry,
     pub set_headers_len: usize,
     pub mailbox: *mut c_char,
+    pub response_json: *mut c_char,
+    pub status_code: u16,
 }
 
 /// Function pointer table returned by `kuria_plugin_create()`.
@@ -174,6 +183,30 @@ pub struct WebRequestArgs {
     pub query: String,
 }
 
+/// Safe args for a plugin-owned API request routed through Kuria.
+pub struct PluginApiRequest {
+    pub method: String,
+    pub path: String,
+    pub headers_json: String,
+    pub query: String,
+    pub body_json: String,
+    pub user_json: String,
+}
+
+/// Safe args for a plugin-owned unauthenticated webhook request.
+pub struct PluginWebhookRequest {
+    pub method: String,
+    pub path: String,
+    pub headers_json: String,
+    pub query: String,
+    pub body_json: String,
+}
+
+/// Safe args for a locally delivered mail notification event.
+pub struct MailDeliveredArgs {
+    pub event_json: String,
+}
+
 /// Safe result returned by hook methods.
 pub struct HookResult {
     pub action: u32,
@@ -182,6 +215,8 @@ pub struct HookResult {
     pub modified_message: Option<Vec<u8>>,
     pub set_headers: Vec<(String, String)>,
     pub mailbox: Option<String>,
+    pub response_json: Option<String>,
+    pub status_code: u16,
 }
 
 impl HookResult {
@@ -193,6 +228,8 @@ impl HookResult {
             modified_message: None,
             set_headers: Vec::new(),
             mailbox: None,
+            response_json: None,
+            status_code: 200,
         }
     }
 
@@ -204,6 +241,8 @@ impl HookResult {
             modified_message: None,
             set_headers: Vec::new(),
             mailbox: None,
+            response_json: None,
+            status_code: 403,
         }
     }
 
@@ -215,6 +254,21 @@ impl HookResult {
             modified_message: None,
             set_headers: Vec::new(),
             mailbox: None,
+            response_json: None,
+            status_code: 200,
+        }
+    }
+
+    pub fn json(status_code: u16, body: impl Into<String>) -> Self {
+        Self {
+            action: ACTION_ACCEPT,
+            reject: false,
+            reject_message: None,
+            modified_message: None,
+            set_headers: Vec::new(),
+            mailbox: None,
+            response_json: Some(body.into()),
+            status_code,
         }
     }
 }
@@ -252,6 +306,18 @@ pub trait Plugin: Send + Sync {
     }
 
     fn on_web_request(&self, _args: &WebRequestArgs) -> HookResult {
+        HookResult::accept()
+    }
+
+    fn on_plugin_api(&self, _args: &PluginApiRequest) -> HookResult {
+        HookResult::accept()
+    }
+
+    fn on_plugin_webhook(&self, _args: &PluginWebhookRequest) -> HookResult {
+        HookResult::accept()
+    }
+
+    fn on_mail_delivered(&self, _args: &MailDeliveredArgs) -> HookResult {
         HookResult::accept()
     }
 }
@@ -333,6 +399,10 @@ pub fn hook_result_to_c(result: HookResult) -> *mut CHookResult {
         .mailbox
         .map(string_to_cstr)
         .unwrap_or(std::ptr::null_mut());
+    let response_json = result
+        .response_json
+        .map(string_to_cstr)
+        .unwrap_or(std::ptr::null_mut());
 
     Box::into_raw(Box::new(CHookResult {
         action: result.action,
@@ -343,6 +413,8 @@ pub fn hook_result_to_c(result: HookResult) -> *mut CHookResult {
         set_headers,
         set_headers_len,
         mailbox,
+        response_json,
+        status_code: result.status_code,
     }))
 }
 
@@ -387,6 +459,10 @@ pub unsafe fn free_c_hook_result(result: *mut CHookResult) {
         if !r.mailbox.is_null() {
             drop(CString::from_raw(r.mailbox));
         }
+        // Free response_json
+        if !r.response_json.is_null() {
+            drop(CString::from_raw(r.response_json));
+        }
         // Free the struct itself
         drop(Box::from_raw(result));
     }
@@ -400,8 +476,18 @@ pub unsafe fn free_c_hook_result(result: *mut CHookResult) {
 /// ```rust,no_run
 /// use kuria_plugin::*;
 ///
+/// #[derive(Default)]
 /// struct MyPlugin;
-/// impl Plugin for MyPlugin { ... }
+///
+/// impl Plugin for MyPlugin {
+///     fn metadata(&self) -> PluginMetadata {
+///         PluginMetadata {
+///             name: "my-plugin",
+///             version: "0.1.0",
+///             description: "A custom plugin",
+///         }
+///     }
+/// }
 ///
 /// declare_plugin!(MyPlugin);
 /// ```
@@ -499,6 +585,33 @@ macro_rules! declare_plugin {
                         };
                         plugin.on_web_request(&web_args)
                     }
+                    $crate::ON_PLUGIN_API => {
+                        let api_args = $crate::PluginApiRequest {
+                            method: $crate::cstr_to_string(a.method),
+                            path: $crate::cstr_to_string(a.path),
+                            headers_json: $crate::cstr_to_string(a.headers_json),
+                            query: $crate::cstr_to_string(a.query),
+                            body_json: $crate::cstr_to_string(a.body_json),
+                            user_json: $crate::cstr_to_string(a.user_json),
+                        };
+                        plugin.on_plugin_api(&api_args)
+                    }
+                    $crate::ON_PLUGIN_WEBHOOK => {
+                        let webhook_args = $crate::PluginWebhookRequest {
+                            method: $crate::cstr_to_string(a.method),
+                            path: $crate::cstr_to_string(a.path),
+                            headers_json: $crate::cstr_to_string(a.headers_json),
+                            query: $crate::cstr_to_string(a.query),
+                            body_json: $crate::cstr_to_string(a.body_json),
+                        };
+                        plugin.on_plugin_webhook(&webhook_args)
+                    }
+                    $crate::ON_MAIL_DELIVERED => {
+                        let event_args = $crate::MailDeliveredArgs {
+                            event_json: $crate::cstr_to_string(a.event_json),
+                        };
+                        plugin.on_mail_delivered(&event_args)
+                    }
                     _ => $crate::HookResult::accept(),
                 };
                 $crate::hook_result_to_c(result)
@@ -514,7 +627,7 @@ macro_rules! declare_plugin {
         // Static plugin instance (leaked, lives for process lifetime).
         static mut __PLUGIN_INSTANCE: Option<$plugin_type> = None;
 
-        #[no_mangle]
+        #[unsafe(no_mangle)]
         pub extern "C" fn kuria_plugin_create() -> *const $crate::PluginVTable {
             unsafe {
                 // Create the plugin instance.

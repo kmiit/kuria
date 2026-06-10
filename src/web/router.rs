@@ -65,6 +65,14 @@ pub fn create_router(
         .route("/api/health", get(|| async { "OK" }))
         .route("/api/setup/status", get(settings::check_setup))
         .route("/api/setup", post(settings::run_setup))
+        .route(
+            "/api/plugins/{plugin}/webhook/{*path}",
+            any(settings::plugin_webhook),
+        )
+        .route(
+            "/plugin-assets/{plugin}/{*path}",
+            get(settings::plugin_asset),
+        )
         .route("/api/{*path}", any(api_not_found));
 
     // Protected routes (auth required)
@@ -97,6 +105,10 @@ pub fn create_router(
         .route("/api/settings", put(settings::update_settings))
         .route("/api/settings/password", post(settings::change_password))
         .route("/api/plugins", get(settings::get_plugins))
+        .route(
+            "/api/plugins/{plugin}/api/{*path}",
+            any(settings::plugin_api),
+        )
         // Outbound queue
         .route("/api/queue", get(queue::list_queue))
         .route("/api/queue/{id}/retry", post(queue::retry_queue_item))

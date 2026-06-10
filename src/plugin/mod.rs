@@ -1,8 +1,10 @@
-use std::ffi::CString;
-
 use kuria_plugin::{CHookArgs, CHookResult, PLUGIN_ABI_VERSION, PluginVTable};
-use serde::Serialize;
-use tracing::{error, info};
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+use std::collections::HashSet;
+use std::ffi::CString;
+use std::path::{Path, PathBuf};
+use tracing::{error, info, warn};
 
 use crate::config::Config;
 
@@ -12,12 +14,38 @@ pub struct PluginInfo {
     pub version: String,
     pub description: String,
     pub path: String,
+    pub admin_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginApiResponse {
+    pub status_code: u16,
+    pub body_json: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginLoadError {
     pub path: String,
     pub error: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginOutboundEmail {
+    pub from: String,
+    pub to: Vec<String>,
+    #[serde(default)]
+    pub cc: Vec<String>,
+    #[serde(default)]
+    pub bcc: Vec<String>,
+    pub subject: String,
+    pub body_text: Option<String>,
+    pub body_html: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct PluginOutboundEmailResponse {
+    #[serde(default)]
+    pub outbound_emails: Vec<PluginOutboundEmail>,
 }
 
 /// A loaded plugin instance: holds the library handle (prevents unload) and vtable.
@@ -55,7 +83,9 @@ impl PluginManager {
             }
         };
 
-        for path in &plugins_config.paths {
+        let (plugin_paths, discovery_errors) = configured_plugin_paths(plugins_config);
+        load_errors.extend(discovery_errors);
+        for path in &plugin_paths {
             match Self::load_single_plugin(path) {
                 Ok(instance) => {
                     info!("Loaded plugin: {} from {}", instance.info.name, path);
@@ -79,9 +109,9 @@ impl PluginManager {
     }
 
     fn load_single_plugin(path: &str) -> anyhow::Result<PluginInstance> {
+        let library_path = resolve_plugin_library_path(path)?;
         unsafe {
-            let library = libloading::Library::new(path)
-                .map_err(|e| anyhow::anyhow!("Failed to load library: {}", e))?;
+            let library = load_dynamic_library(&library_path)?;
 
             let create_fn: libloading::Symbol<unsafe extern "C" fn() -> *const PluginVTable> =
                 library
@@ -114,13 +144,20 @@ impl PluginManager {
             } else {
                 ("unknown".to_string(), String::new(), String::new())
             };
+            let admin_path = plugin_embedded_admin_ui_available(vtable).then(|| {
+                format!(
+                    "/plugin-assets/{}/index.html",
+                    plugin_asset_path_segment(&name)
+                )
+            });
 
             Ok(PluginInstance {
                 info: PluginInfo {
                     name,
                     version,
                     description,
-                    path: path.to_string(),
+                    path: library_path.to_string_lossy().to_string(),
+                    admin_path,
                 },
                 _library: library,
                 vtable,
@@ -137,6 +174,55 @@ impl PluginManager {
 
     pub fn load_errors(&self) -> &[PluginLoadError] {
         &self.load_errors
+    }
+
+    pub fn call_plugin_admin_asset(
+        &self,
+        plugin_name: &str,
+        request_path: &str,
+    ) -> Option<PluginApiResponse> {
+        let plugin = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.info.name.eq_ignore_ascii_case(plugin_name))?;
+        plugin.info.admin_path.as_ref()?;
+        let path = plugin_admin_asset_api_path(request_path)?;
+        let method_cstr = CString::new("GET").ok()?;
+        let path_cstr = CString::new(path).ok()?;
+        let headers_cstr = CString::new("{}").ok()?;
+        let empty_cstr = CString::new("").ok()?;
+
+        let result = unsafe {
+            let args = CHookArgs {
+                peer_addr: std::ptr::null(),
+                is_tls: false,
+                sender: std::ptr::null(),
+                recipient: std::ptr::null(),
+                recipients: std::ptr::null(),
+                recipients_len: 0,
+                raw_message: std::ptr::null(),
+                raw_message_len: 0,
+                config_json: std::ptr::null(),
+                method: method_cstr.as_ptr(),
+                path: path_cstr.as_ptr(),
+                headers_json: headers_cstr.as_ptr(),
+                query: empty_cstr.as_ptr(),
+                body_json: empty_cstr.as_ptr(),
+                user_json: empty_cstr.as_ptr(),
+                event_json: std::ptr::null(),
+            };
+
+            self.invoke_hook(plugin, kuria_plugin::ON_PLUGIN_API, &args)
+        }?;
+
+        Some(PluginApiResponse {
+            status_code: if result.status_code == 0 {
+                200
+            } else {
+                result.status_code
+            },
+            body_json: result.response_json.unwrap_or_default(),
+        })
     }
 
     /// Call `on_init` for all loaded plugins.
@@ -160,6 +246,9 @@ impl PluginManager {
                     path: std::ptr::null(),
                     headers_json: std::ptr::null(),
                     query: std::ptr::null(),
+                    body_json: std::ptr::null(),
+                    user_json: std::ptr::null(),
+                    event_json: std::ptr::null(),
                 };
 
                 let result = ((*plugin.vtable).init)(&args);
@@ -204,6 +293,9 @@ impl PluginManager {
                     path: std::ptr::null(),
                     headers_json: std::ptr::null(),
                     query: std::ptr::null(),
+                    body_json: std::ptr::null(),
+                    user_json: std::ptr::null(),
+                    event_json: std::ptr::null(),
                 };
 
                 if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_CONNECT, &args)
@@ -242,6 +334,9 @@ impl PluginManager {
                     path: std::ptr::null(),
                     headers_json: std::ptr::null(),
                     query: std::ptr::null(),
+                    body_json: std::ptr::null(),
+                    user_json: std::ptr::null(),
+                    event_json: std::ptr::null(),
                 };
 
                 if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_FROM, &args)
@@ -282,6 +377,9 @@ impl PluginManager {
                     path: std::ptr::null(),
                     headers_json: std::ptr::null(),
                     query: std::ptr::null(),
+                    body_json: std::ptr::null(),
+                    user_json: std::ptr::null(),
+                    event_json: std::ptr::null(),
                 };
 
                 if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_TO, &args)
@@ -330,6 +428,9 @@ impl PluginManager {
                     path: std::ptr::null(),
                     headers_json: std::ptr::null(),
                     query: std::ptr::null(),
+                    body_json: std::ptr::null(),
+                    user_json: std::ptr::null(),
+                    event_json: std::ptr::null(),
                 };
 
                 if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_SMTP_DATA, &args)
@@ -371,6 +472,9 @@ impl PluginManager {
                     path: path_cstr.as_ptr(),
                     headers_json: headers_cstr.as_ptr(),
                     query: query_cstr.as_ptr(),
+                    body_json: std::ptr::null(),
+                    user_json: std::ptr::null(),
+                    event_json: std::ptr::null(),
                 };
 
                 if let Some(result) = self.invoke_hook(plugin, kuria_plugin::ON_WEB_REQUEST, &args)
@@ -381,6 +485,155 @@ impl PluginManager {
             }
         }
         None
+    }
+
+    pub fn call_plugin_api(
+        &self,
+        plugin_name: &str,
+        method: &str,
+        path: &str,
+        headers_json: &str,
+        query: &str,
+        body_json: &str,
+        user_json: &str,
+    ) -> Option<PluginApiResponse> {
+        let plugin = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.info.name.eq_ignore_ascii_case(plugin_name))?;
+        let method_cstr = CString::new(method).unwrap_or_default();
+        let path_cstr = CString::new(path).unwrap_or_default();
+        let headers_cstr = CString::new(headers_json).unwrap_or_default();
+        let query_cstr = CString::new(query).unwrap_or_default();
+        let body_cstr = CString::new(body_json).unwrap_or_default();
+        let user_cstr = CString::new(user_json).unwrap_or_default();
+
+        let result = unsafe {
+            let args = CHookArgs {
+                peer_addr: std::ptr::null(),
+                is_tls: false,
+                sender: std::ptr::null(),
+                recipient: std::ptr::null(),
+                recipients: std::ptr::null(),
+                recipients_len: 0,
+                raw_message: std::ptr::null(),
+                raw_message_len: 0,
+                config_json: std::ptr::null(),
+                method: method_cstr.as_ptr(),
+                path: path_cstr.as_ptr(),
+                headers_json: headers_cstr.as_ptr(),
+                query: query_cstr.as_ptr(),
+                body_json: body_cstr.as_ptr(),
+                user_json: user_cstr.as_ptr(),
+                event_json: std::ptr::null(),
+            };
+
+            self.invoke_hook(plugin, kuria_plugin::ON_PLUGIN_API, &args)
+        };
+
+        let result = result?;
+        let body_json = result.response_json.unwrap_or_else(|| {
+            json!({
+                "error": "Plugin did not return a response",
+            })
+            .to_string()
+        });
+        Some(PluginApiResponse {
+            status_code: if result.status_code == 0 {
+                200
+            } else {
+                result.status_code
+            },
+            body_json,
+        })
+    }
+
+    pub fn call_plugin_webhook(
+        &self,
+        plugin_name: &str,
+        method: &str,
+        path: &str,
+        headers_json: &str,
+        query: &str,
+        body_json: &str,
+    ) -> Option<PluginApiResponse> {
+        let plugin = self
+            .plugins
+            .iter()
+            .find(|plugin| plugin.info.name.eq_ignore_ascii_case(plugin_name))?;
+        let method_cstr = CString::new(method).unwrap_or_default();
+        let path_cstr = CString::new(path).unwrap_or_default();
+        let headers_cstr = CString::new(headers_json).unwrap_or_default();
+        let query_cstr = CString::new(query).unwrap_or_default();
+        let body_cstr = CString::new(body_json).unwrap_or_default();
+
+        let result = unsafe {
+            let args = CHookArgs {
+                peer_addr: std::ptr::null(),
+                is_tls: false,
+                sender: std::ptr::null(),
+                recipient: std::ptr::null(),
+                recipients: std::ptr::null(),
+                recipients_len: 0,
+                raw_message: std::ptr::null(),
+                raw_message_len: 0,
+                config_json: std::ptr::null(),
+                method: method_cstr.as_ptr(),
+                path: path_cstr.as_ptr(),
+                headers_json: headers_cstr.as_ptr(),
+                query: query_cstr.as_ptr(),
+                body_json: body_cstr.as_ptr(),
+                user_json: std::ptr::null(),
+                event_json: std::ptr::null(),
+            };
+
+            self.invoke_hook(plugin, kuria_plugin::ON_PLUGIN_WEBHOOK, &args)
+        };
+
+        let result = result?;
+        let body_json = result.response_json.unwrap_or_else(|| {
+            json!({
+                "error": "Plugin did not return a response",
+            })
+            .to_string()
+        });
+        Some(PluginApiResponse {
+            status_code: if result.status_code == 0 {
+                200
+            } else {
+                result.status_code
+            },
+            body_json,
+        })
+    }
+
+    pub fn call_mail_delivered(&self, event_json: &str) {
+        let event_cstr = CString::new(event_json).unwrap_or_default();
+
+        for plugin in &self.plugins {
+            unsafe {
+                let args = CHookArgs {
+                    peer_addr: std::ptr::null(),
+                    is_tls: false,
+                    sender: std::ptr::null(),
+                    recipient: std::ptr::null(),
+                    recipients: std::ptr::null(),
+                    recipients_len: 0,
+                    raw_message: std::ptr::null(),
+                    raw_message_len: 0,
+                    config_json: std::ptr::null(),
+                    method: std::ptr::null(),
+                    path: std::ptr::null(),
+                    headers_json: std::ptr::null(),
+                    query: std::ptr::null(),
+                    body_json: std::ptr::null(),
+                    user_json: std::ptr::null(),
+                    event_json: event_cstr.as_ptr(),
+                };
+
+                let _ = self.invoke_hook(plugin, kuria_plugin::ON_MAIL_DELIVERED, &args);
+            }
+        }
     }
 
     /// Internal: call a hook on a single plugin and convert the C result to Rust.
@@ -403,6 +656,226 @@ impl PluginManager {
     }
 }
 
+fn resolve_plugin_library_path(path: &str) -> anyhow::Result<PathBuf> {
+    let path = Path::new(path);
+    if !path.exists() {
+        return Err(anyhow::anyhow!(
+            "Plugin library does not exist: {}",
+            path.display()
+        ));
+    }
+    if !path.is_file() {
+        return Err(anyhow::anyhow!(
+            "Plugin library path is not a file: {}",
+            path.display()
+        ));
+    }
+
+    path.canonicalize().map_err(|error| {
+        anyhow::anyhow!(
+            "Failed to resolve plugin library path {}: {}",
+            path.display(),
+            error
+        )
+    })
+}
+
+#[cfg(windows)]
+unsafe fn load_dynamic_library(path: &Path) -> anyhow::Result<libloading::Library> {
+    use libloading::os::windows::{
+        LOAD_LIBRARY_SEARCH_DEFAULT_DIRS, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR,
+        Library as WindowsLibrary,
+    };
+
+    unsafe {
+        WindowsLibrary::load_with_flags(
+            path,
+            LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS,
+        )
+        .map(Into::into)
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "Failed to load library: {}. Make sure any dependent DLLs are next to the plugin DLL or in a system DLL directory.",
+                error
+            )
+        })
+    }
+}
+
+#[cfg(not(windows))]
+unsafe fn load_dynamic_library(path: &Path) -> anyhow::Result<libloading::Library> {
+    unsafe {
+        libloading::Library::new(path)
+            .map_err(|error| anyhow::anyhow!("Failed to load library: {}", error))
+    }
+}
+
+fn plugin_embedded_admin_ui_available(vtable: *const PluginVTable) -> bool {
+    unsafe {
+        invoke_embedded_admin_asset(vtable, "/admin/manifest")
+            .map(|result| {
+                (200..300).contains(&result.status_code) && result.response_json.is_some()
+            })
+            .unwrap_or(false)
+    }
+}
+
+unsafe fn invoke_embedded_admin_asset(
+    vtable: *const PluginVTable,
+    path: &str,
+) -> Option<HookResult> {
+    let method_cstr = CString::new("GET").ok()?;
+    let path_cstr = CString::new(path).ok()?;
+    let headers_cstr = CString::new("{}").ok()?;
+    let empty_cstr = CString::new("").ok()?;
+
+    unsafe {
+        let args = CHookArgs {
+            peer_addr: std::ptr::null(),
+            is_tls: false,
+            sender: std::ptr::null(),
+            recipient: std::ptr::null(),
+            recipients: std::ptr::null(),
+            recipients_len: 0,
+            raw_message: std::ptr::null(),
+            raw_message_len: 0,
+            config_json: std::ptr::null(),
+            method: method_cstr.as_ptr(),
+            path: path_cstr.as_ptr(),
+            headers_json: headers_cstr.as_ptr(),
+            query: empty_cstr.as_ptr(),
+            body_json: empty_cstr.as_ptr(),
+            user_json: empty_cstr.as_ptr(),
+            event_json: std::ptr::null(),
+        };
+        let result_ptr = ((*vtable).hook)(kuria_plugin::ON_PLUGIN_API, &args);
+        if result_ptr.is_null() {
+            return None;
+        }
+
+        let result = c_to_hook_result(result_ptr);
+        ((*vtable).free_result)(result_ptr);
+        Some(result)
+    }
+}
+
+fn plugin_admin_asset_api_path(request_path: &str) -> Option<String> {
+    let request_path = request_path.trim_matches('/');
+    if request_path.is_empty() {
+        return Some("/admin/".to_string());
+    }
+
+    let mut segments = Vec::new();
+    for segment in request_path.split('/') {
+        if segment.is_empty() || segment == "." {
+            continue;
+        }
+        if segment == ".." || segment.contains('\\') {
+            return None;
+        }
+        segments.push(segment);
+    }
+
+    if segments.is_empty() {
+        Some("/admin/".to_string())
+    } else {
+        Some(format!("/admin/{}", segments.join("/")))
+    }
+}
+
+fn plugin_asset_path_segment(name: &str) -> String {
+    name.replace(['/', '\\'], "_")
+}
+
+fn configured_plugin_paths(
+    config: &crate::config::PluginsConfig,
+) -> (Vec<String>, Vec<PluginLoadError>) {
+    let mut paths = Vec::new();
+    let mut seen = HashSet::new();
+    let mut load_errors = Vec::new();
+
+    for path in &config.paths {
+        push_plugin_path(&mut paths, &mut seen, path.clone());
+    }
+
+    if let Some(directory) = &config.directory {
+        let dynamic_ext = std::env::consts::DLL_EXTENSION;
+        match std::fs::read_dir(directory) {
+            Ok(entries) => {
+                let mut discovered = Vec::new();
+                for entry in entries {
+                    let entry = match entry {
+                        Ok(entry) => entry,
+                        Err(error) => {
+                            warn!(
+                                "Failed to read plugin directory entry in {}: {}",
+                                directory, error
+                            );
+                            load_errors.push(PluginLoadError {
+                                path: directory.clone(),
+                                error: format!("Failed to read plugin directory entry: {error}"),
+                            });
+                            continue;
+                        }
+                    };
+
+                    let path = entry.path();
+                    if !is_dynamic_library_file(&path, dynamic_ext) {
+                        continue;
+                    }
+                    discovered.push(path.to_string_lossy().to_string());
+                }
+
+                discovered.sort();
+                for path in discovered {
+                    push_plugin_path(&mut paths, &mut seen, path);
+                }
+            }
+            Err(error) => {
+                warn!("Failed to scan plugin directory {}: {}", directory, error);
+                load_errors.push(PluginLoadError {
+                    path: directory.clone(),
+                    error: format!("Failed to scan plugin directory: {error}"),
+                });
+            }
+        }
+    }
+
+    (paths, load_errors)
+}
+
+fn is_dynamic_library_file(path: &Path, dynamic_ext: &str) -> bool {
+    path.is_file()
+        && path
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .is_some_and(|extension| extension.eq_ignore_ascii_case(dynamic_ext))
+}
+
+fn push_plugin_path(paths: &mut Vec<String>, seen: &mut HashSet<String>, path: String) {
+    if seen.insert(plugin_path_key(&path)) {
+        paths.push(path);
+    }
+}
+
+fn plugin_path_key(path: &str) -> String {
+    let key = Path::new(path)
+        .canonicalize()
+        .unwrap_or_else(|_| PathBuf::from(path))
+        .to_string_lossy()
+        .to_string();
+
+    #[cfg(windows)]
+    {
+        key.to_ascii_lowercase()
+    }
+
+    #[cfg(not(windows))]
+    {
+        key
+    }
+}
+
 /// Safe Rust representation of a hook result returned by a plugin.
 #[derive(Debug, Clone)]
 pub struct HookResult {
@@ -412,6 +885,8 @@ pub struct HookResult {
     pub modified_message: Option<Vec<u8>>,
     pub set_headers: Vec<(String, String)>,
     pub mailbox: Option<String>,
+    pub response_json: Option<String>,
+    pub status_code: u16,
 }
 
 impl HookResult {
@@ -432,6 +907,7 @@ unsafe fn c_to_hook_result(ptr: *const CHookResult) -> HookResult {
 
         let reject_message = read_cstr(r.reject_message);
         let mailbox = read_cstr(r.mailbox);
+        let response_json = read_cstr(r.response_json);
 
         let modified_message = if !r.modified_message.is_null() && r.modified_message_len > 0 {
             Some(std::slice::from_raw_parts(r.modified_message, r.modified_message_len).to_vec())
@@ -460,8 +936,41 @@ unsafe fn c_to_hook_result(ptr: *const CHookResult) -> HookResult {
             modified_message,
             set_headers,
             mailbox,
+            response_json,
+            status_code: r.status_code,
         }
     }
+}
+
+pub fn mail_delivered_event_json(email: &crate::db::models::Email, user_email: &str) -> String {
+    let recipients: Vec<String> = serde_json::from_str(&email.recipients).unwrap_or_default();
+    json!({
+        "kind": "mail_delivered",
+        "email_id": email.id,
+        "user_id": email.user_id,
+        "user_email": user_email,
+        "mailbox": email.mailbox.as_deref().unwrap_or("INBOX"),
+        "sender": email.sender,
+        "recipients": recipients,
+        "subject": email.subject,
+        "body_preview": body_preview(email),
+        "created_at": email.created_at,
+    })
+    .to_string()
+}
+
+fn body_preview(email: &crate::db::models::Email) -> String {
+    let body = email
+        .body_text
+        .as_deref()
+        .or(email.body_html.as_deref())
+        .unwrap_or("");
+    body.split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+        .chars()
+        .take(240)
+        .collect()
 }
 
 /// Read a `*const c_char` to an Option<String>. Returns None if null.
@@ -490,6 +999,8 @@ mod tests {
             modified_message: None,
             set_headers: Vec::new(),
             mailbox: None,
+            response_json: None,
+            status_code: 200,
         };
         assert!(!result.is_effective_smtp_data_result());
 
@@ -505,5 +1016,73 @@ mod tests {
         result.mailbox = None;
         result.modified_message = Some(b"message".to_vec());
         assert!(result.is_effective_smtp_data_result());
+    }
+
+    #[test]
+    fn configured_plugin_paths_discovers_libraries_from_directory_without_explicit_paths() {
+        let dir = unique_test_dir("plugin-discovery");
+        std::fs::create_dir_all(&dir).expect("create temp plugin dir");
+        let plugin = dir.join(format!("sample.{}", std::env::consts::DLL_EXTENSION));
+        let ignored = dir.join("ignored.txt");
+        std::fs::write(&plugin, b"not a real plugin").expect("write plugin placeholder");
+        std::fs::write(ignored, b"ignored").expect("write ignored file");
+
+        let config = crate::config::PluginsConfig {
+            enabled: true,
+            paths: Vec::new(),
+            directory: Some(dir.to_string_lossy().to_string()),
+        };
+
+        let (paths, errors) = configured_plugin_paths(&config);
+
+        assert!(errors.is_empty());
+        assert_eq!(paths, vec![plugin.to_string_lossy().to_string()]);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn configured_plugin_paths_deduplicates_explicit_and_discovered_paths() {
+        let dir = unique_test_dir("plugin-dedupe");
+        std::fs::create_dir_all(&dir).expect("create temp plugin dir");
+        let plugin = dir.join(format!("sample.{}", std::env::consts::DLL_EXTENSION));
+        std::fs::write(&plugin, b"not a real plugin").expect("write plugin placeholder");
+
+        let plugin_path = plugin.to_string_lossy().to_string();
+        let config = crate::config::PluginsConfig {
+            enabled: true,
+            paths: vec![plugin_path.clone()],
+            directory: Some(dir.to_string_lossy().to_string()),
+        };
+
+        let (paths, errors) = configured_plugin_paths(&config);
+
+        assert!(errors.is_empty());
+        assert_eq!(paths, vec![plugin_path]);
+
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn plugin_admin_asset_paths_are_normalized() {
+        assert_eq!(plugin_admin_asset_api_path(""), Some("/admin/".to_string()));
+        assert_eq!(
+            plugin_admin_asset_api_path("app.js"),
+            Some("/admin/app.js".to_string())
+        );
+        assert_eq!(
+            plugin_admin_asset_api_path("/nested/route/"),
+            Some("/admin/nested/route".to_string())
+        );
+        assert!(plugin_admin_asset_api_path("../secret.txt").is_none());
+        assert!(plugin_admin_asset_api_path("..\\secret.txt").is_none());
+    }
+
+    fn unique_test_dir(name: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("kuria-{name}-{}-{nonce}", std::process::id()))
     }
 }

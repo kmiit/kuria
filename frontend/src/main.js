@@ -23,6 +23,7 @@ const router = createRouter({
         { path: 'domains', name: 'domains', component: () => import('./views/Domains.vue'), meta: { admin: true } },
         { path: 'users', name: 'users', component: () => import('./views/Users.vue'), meta: { admin: true } },
         { path: 'settings', name: 'settings', component: () => import('./views/Settings.vue'), meta: { admin: true } },
+        { path: 'plugins/:plugin', name: 'plugin-config', component: () => import('./views/PluginConfig.vue'), meta: { admin: true } },
       ],
     },
   ],

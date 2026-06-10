@@ -5,12 +5,14 @@ use tracing::info;
 use crate::config::Config;
 use crate::db::queries;
 use crate::mail::compose::{ComposedAttachment, save_composed_attachments};
+use crate::plugin::{PluginManager, mail_delivered_event_json};
 use crate::smtp::sender::{MailSender, RawComposedMessage};
 
 pub struct MailDelivery {
     config: Arc<Config>,
     db: sqlx::SqlitePool,
     sender: MailSender,
+    plugins: Option<Arc<PluginManager>>,
 }
 
 pub struct ComposedEmail<'a> {
@@ -25,9 +27,29 @@ pub struct ComposedEmail<'a> {
 }
 
 impl MailDelivery {
+    #[cfg(test)]
     pub fn new(config: Arc<Config>, db: sqlx::SqlitePool) -> Self {
         let sender = MailSender::new(config.clone(), db.clone());
-        Self { config, db, sender }
+        Self {
+            config,
+            db,
+            sender,
+            plugins: None,
+        }
+    }
+
+    pub fn with_plugins(
+        config: Arc<Config>,
+        db: sqlx::SqlitePool,
+        plugins: Arc<PluginManager>,
+    ) -> Self {
+        let sender = MailSender::new(config.clone(), db.clone());
+        Self {
+            config,
+            db,
+            sender,
+            plugins: Some(plugins),
+        }
     }
 
     pub async fn send_composed_email(&self, message: ComposedEmail<'_>) -> anyhow::Result<Vec<u8>> {
@@ -71,6 +93,10 @@ impl MailDelivery {
             )
             .await?;
             save_composed_attachments(&self.db, email.id, message.attachments).await?;
+            if let Some(plugins) = &self.plugins {
+                let event_json = mail_delivered_event_json(&email, &local_user.email);
+                plugins.call_mail_delivered(&event_json);
+            }
             info!(
                 "Email delivered locally from {} to {}",
                 message.from, local_user.email

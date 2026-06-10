@@ -83,6 +83,7 @@ pub struct DkimConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct PluginsConfig {
     pub enabled: bool,
+    #[serde(default)]
     pub paths: Vec<String>,
     pub directory: Option<String>,
 }
@@ -207,5 +208,19 @@ mod tests {
         config.harden_runtime_secrets();
 
         assert_eq!(config.web.jwt_secret, "0123456789abcdef0123456789abcdef");
+    }
+
+    #[test]
+    fn plugin_paths_default_to_empty_when_omitted() {
+        let plugins: PluginsConfig = toml::from_str(
+            r#"
+enabled = true
+directory = "./plugins"
+"#,
+        )
+        .expect("plugins config should parse without paths");
+
+        assert!(plugins.paths.is_empty());
+        assert_eq!(plugins.directory.as_deref(), Some("./plugins"));
     }
 }

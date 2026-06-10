@@ -56,7 +56,7 @@ function listenAddrToTarget(listenAddr) {
 }
 
 const apiTarget = readBackendTarget()
-console.info(`[kuria] proxy /api -> ${apiTarget}`)
+console.info(`[kuria] proxy /api and /plugin-assets -> ${apiTarget}`)
 
 function isKnownDependencyWarning(level, log) {
   if (level !== 'warn' || log?.code !== 'INVALID_ANNOTATION') return false
@@ -76,6 +76,10 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api': {
+        target: apiTarget,
+        changeOrigin: true,
+      },
+      '/plugin-assets': {
         target: apiTarget,
         changeOrigin: true,
       },

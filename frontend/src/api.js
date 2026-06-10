@@ -81,6 +81,11 @@ function withQuery(path, params) {
   return search ? `${path}?${search}` : path
 }
 
+function pluginApiPath(plugin, path = '') {
+  const cleanPath = String(path || '').replace(/^\/+/, '')
+  return `/api/plugins/${encodeURIComponent(plugin)}/api/${cleanPath}`
+}
+
 export const api = {
   // Auth
   login: (email, password) =>
@@ -163,6 +168,24 @@ export const api = {
     request('/api/settings/password', {
       method: 'POST',
       body: JSON.stringify({ old_password, new_password }),
+    }),
+
+  // Plugins
+  getPlugins: () => request('/api/plugins'),
+  pluginGet: (plugin, path) => request(pluginApiPath(plugin, path)),
+  pluginPost: (plugin, path, data = {}) =>
+    request(pluginApiPath(plugin, path), {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  pluginPut: (plugin, path, data = {}) =>
+    request(pluginApiPath(plugin, path), {
+      method: 'PUT',
+      body: JSON.stringify(data),
+    }),
+  pluginDelete: (plugin, path) =>
+    request(pluginApiPath(plugin, path), {
+      method: 'DELETE',
     }),
 
   // Queue

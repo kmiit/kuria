@@ -664,7 +664,11 @@ pub async fn send_email(
         }
     }
 
-    let delivery = MailDelivery::new(state.config.clone(), state.db.clone());
+    let delivery = MailDelivery::with_plugins(
+        state.config.clone(),
+        state.db.clone(),
+        state.plugins.clone(),
+    );
     let attachments = if request_attachments.is_none() {
         if let Some(draft_id) = draft_id {
             let draft_attachments = queries::get_attachments_by_email(&state.db, draft_id)

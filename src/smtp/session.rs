@@ -316,6 +316,9 @@ where
                                         }
                                     }
                                 }
+                                let event_json =
+                                    crate::plugin::mail_delivered_event_json(&email, &user.email);
+                                plugins.call_mail_delivered(&event_json);
                                 delivered = true;
                                 debug!("Email stored locally for {} (id: {})", rcpt, email.id);
                             }
@@ -329,8 +332,11 @@ where
                 }
 
                 if !recipient_split.external.is_empty() {
-                    let delivery =
-                        crate::mail::delivery::MailDelivery::new(config.clone(), db.clone());
+                    let delivery = crate::mail::delivery::MailDelivery::with_plugins(
+                        config.clone(),
+                        db.clone(),
+                        plugins.clone(),
+                    );
                     match delivery
                         .relay_raw_email(
                             sender.as_deref().unwrap_or(""),
