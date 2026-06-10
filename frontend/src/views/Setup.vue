@@ -35,6 +35,7 @@ const form = ref({
   useNginxProxy: false,
   smtpPort: '25',
   imapPort: '143',
+  pop3Port: '110',
   webPort: '8080',
 })
 
@@ -359,6 +360,7 @@ async function runSetup() {
       use_nginx_proxy: form.value.useNginxProxy,
       smtp_port: parseInt(form.value.smtpPort) || 25,
       imap_port: parseInt(form.value.imapPort) || 143,
+      pop3_port: parseInt(form.value.pop3Port) || 110,
       web_port: parseInt(form.value.webPort) || 8080,
     })
 
@@ -504,6 +506,10 @@ function copyNginxConfig() {
               <label class="field">
                 <span>IMAP 端口</span>
                 <MiuixInput v-model="form.imapPort" placeholder="143" />
+              </label>
+              <label class="field">
+                <span>POP3 端口</span>
+                <MiuixInput v-model="form.pop3Port" placeholder="110" />
               </label>
               <label class="field">
                 <span>Web 端口</span>
@@ -866,7 +872,7 @@ function copyNginxConfig() {
 }
 
 .ports-grid {
-  grid-template-columns: repeat(3, 1fr);
+  grid-template-columns: repeat(4, 1fr);
   gap: 12px;
 }
 

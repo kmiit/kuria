@@ -10,6 +10,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub smtp: SmtpConfig,
     pub imap: ImapConfig,
+    pub pop3: Pop3Config,
     pub web: WebConfig,
     pub database: DatabaseConfig,
     pub tls: TlsConfig,
@@ -35,6 +36,12 @@ pub struct ImapConfig {
     pub listen_addr: String,
     pub listen_addr_tls: String,
     pub enable_starttls: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct Pop3Config {
+    pub listen_addr: String,
+    pub listen_addr_tls: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -160,6 +167,10 @@ impl Default for Config {
                 listen_addr: "0.0.0.0:143".to_string(),
                 listen_addr_tls: "0.0.0.0:993".to_string(),
                 enable_starttls: true,
+            },
+            pop3: Pop3Config {
+                listen_addr: "0.0.0.0:110".to_string(),
+                listen_addr_tls: "0.0.0.0:995".to_string(),
             },
             web: WebConfig {
                 listen_addr: "0.0.0.0:8080".to_string(),

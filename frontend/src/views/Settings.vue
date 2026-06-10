@@ -243,6 +243,10 @@ onMounted(async () => {
                 <span class="info-label">IMAP 端口</span>
                 <span class="info-value">{{ settings.imap_port }}</span>
               </button>
+              <button class="info-item" type="button" @click="copyValue(settings.pop3_port)">
+                <span class="info-label">POP3 端口</span>
+                <span class="info-value">{{ settings.pop3_port }}</span>
+              </button>
               <button class="info-item" type="button" @click="copyValue(settings.web_port)">
                 <span class="info-label">Web 端口</span>
                 <span class="info-value">{{ settings.web_port }}</span>

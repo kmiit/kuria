@@ -5,6 +5,7 @@ mod imap;
 mod mail;
 mod mail_services;
 mod plugin;
+mod pop3;
 mod smtp;
 mod tls;
 mod web;
@@ -88,6 +89,8 @@ struct BoundListeners {
     smtps: Option<TcpListener>,
     imap: TcpListener,
     imaps: Option<TcpListener>,
+    pop3: TcpListener,
+    pop3s: Option<TcpListener>,
     internal_tls: InternalTlsStatus,
 }
 
@@ -145,6 +148,13 @@ async fn bind_service_listeners(config: &Config) -> anyhow::Result<BoundListener
         None
     };
 
+    let pop3 = bind_endpoint("POP3", &config.pop3.listen_addr, &mut errors).await;
+    let pop3s = if !listener_disabled(&config.pop3.listen_addr_tls) && internal_tls_enabled {
+        bind_endpoint("POP3S", &config.pop3.listen_addr_tls, &mut errors).await
+    } else {
+        None
+    };
+
     if !errors.is_empty() {
         anyhow::bail!(
             "端口占用检测失败，Kuria 未启动任何服务。\n{}\n请停止占用进程，或修改 config.toml 中对应的 listen_addr。",
@@ -157,6 +167,8 @@ async fn bind_service_listeners(config: &Config) -> anyhow::Result<BoundListener
         smtps,
         imap: imap.expect("IMAP listener must be bound when no errors were reported"),
         imaps,
+        pop3: pop3.expect("POP3 listener must be bound when no errors were reported"),
+        pop3s,
         internal_tls,
     })
 }
@@ -307,6 +319,25 @@ async fn main() -> anyhow::Result<()> {
             *imap_running.write().await = false;
         });
 
+        // POP3 Server
+        let pop3_config = config.clone();
+        let pop3_db = db.clone();
+        let pop3_listener = listeners.pop3;
+        let pop3s_enabled = listeners.pop3s.is_some();
+        let pop3s_listener = listeners.pop3s;
+        let pop3_running = mail_services.pop3_running.clone();
+        tokio::spawn(async move {
+            *pop3_running.write().await = true;
+            let server = pop3::server::Pop3Server::new(pop3_config, pop3_db);
+            if let Err(e) = server
+                .start_with_listeners(pop3_listener, pop3s_listener)
+                .await
+            {
+                tracing::error!("POP3 server error: {}", e);
+            }
+            *pop3_running.write().await = false;
+        });
+
         tracing::info!("Kuria Mail Server started successfully");
         tracing::info!("  SMTP: {}", config.smtp.listen_addr);
         tracing::info!(
@@ -326,7 +357,15 @@ async fn main() -> anyhow::Result<()> {
                 internal_tls
             )
         );
-        tracing::info!("  Web:  http://{}", config.web.listen_addr);
+        tracing::info!("  POP3: {}", config.pop3.listen_addr);
+        tracing::info!(
+            "  POP3S: {}",
+            tls_listener_summary(
+                &config.pop3.listen_addr_tls,
+                pop3s_enabled,
+                internal_tls
+            )
+        );
         tracing::info!("  Web:  http://{}", config.web.listen_addr);
         if cfg!(debug_assertions) && is_cargo_run {
             tracing::info!("  Frontend (HMR): http://localhost:3000");

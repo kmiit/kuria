@@ -22,6 +22,12 @@ listen_addr_tls = "0.0.0.0:993"
 # 是否启用 STARTTLS
 enable_starttls = true
 
+[pop3]
+# POP3 监听地址
+listen_addr = "0.0.0.0:110"
+# POP3S 监听地址 (隐式 TLS)
+listen_addr_tls = "0.0.0.0:995"
+
 [web]
 # Web 管理界面监听地址
 listen_addr = "0.0.0.0:8080"

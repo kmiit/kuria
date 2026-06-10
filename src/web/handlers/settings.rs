@@ -130,6 +130,7 @@ pub struct SetupRequest {
     pub use_nginx_proxy: Option<bool>,
     pub smtp_port: Option<u16>,
     pub imap_port: Option<u16>,
+    pub pop3_port: Option<u16>,
     pub web_port: Option<u16>,
 }
 
@@ -385,11 +386,15 @@ pub async fn get_settings(
         "hostname": hostname,
         "smtp_port": listen_port(&current_config.smtp.listen_addr),
         "imap_port": listen_port(&current_config.imap.listen_addr),
+        "pop3_port": listen_port(&current_config.pop3.listen_addr),
         "web_port": listen_port(&current_config.web.listen_addr),
         "dkim_selector": current_config.dkim.selector,
         "detected_ips": detected_server_ips().await,
         "manual_public_ips": manual_public_ips(&state).await.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?,
         "plugins": plugins,
+        "smtp_running": *state.mail_services.smtp_running.read().await,
+        "imap_running": *state.mail_services.imap_running.read().await,
+        "pop3_running": *state.mail_services.pop3_running.read().await,
     })))
 }
 
@@ -711,6 +716,7 @@ pub async fn change_password(
 async fn generate_nginx_config(hostname: &str, config: &crate::config::Config) -> anyhow::Result<String> {
     let smtp_port = listen_port(&config.smtp.listen_addr).unwrap_or(25);
     let imap_port = listen_port(&config.imap.listen_addr).unwrap_or(143);
+    let pop3_port = listen_port(&config.pop3.listen_addr).unwrap_or(110);
     let web_port = listen_port(&config.web.listen_addr).unwrap_or(8080);
 
     let nginx_conf = format!(r#"# Kuria Mail Server - Nginx Configuration
@@ -762,6 +768,22 @@ server {{
     ssl_ciphers HIGH:!aNULL:!MD5;
 }}
 
+# POP3S (port 995) -> POP3 plain (port {pop3_port})
+upstream kuria_pop3 {{
+    server 127.0.0.1:{pop3_port};
+}}
+
+server {{
+    listen 995 ssl;
+    proxy_pass kuria_pop3;
+    proxy_connect_timeout 1s;
+
+    ssl_certificate /path/to/cert.pem;
+    ssl_certificate_key /path/to/key.pem;
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_ciphers HIGH:!aNULL:!MD5;
+}}
+
 # ============ kuria-mail-http.conf (放在 http 块中) ============
 
 # Web UI HTTPS (port 443) -> HTTP (port {web_port})
@@ -802,6 +824,9 @@ async fn save_config_file(payload: &SetupRequest, base_config: &crate::config::C
     if let Some(port) = payload.imap_port {
         config.imap.listen_addr = format!("0.0.0.0:{}", port);
     }
+    if let Some(port) = payload.pop3_port {
+        config.pop3.listen_addr = format!("0.0.0.0:{}", port);
+    }
     if let Some(port) = payload.web_port {
         config.web.listen_addr = format!("0.0.0.0:{}", port);
     }
@@ -810,6 +835,7 @@ async fn save_config_file(payload: &SetupRequest, base_config: &crate::config::C
         config.tls.mode = TlsMode::External;
         config.smtp.listen_addr_tls = "0.0.0.0:0".to_string();
         config.imap.listen_addr_tls = "0.0.0.0:0".to_string();
+        config.pop3.listen_addr_tls = "0.0.0.0:0".to_string();
     }
 
     let toml_str = toml::to_string_pretty(&config)?;
@@ -897,6 +923,39 @@ async fn start_mail_services(state: &AppState) {
             tracing::error!("IMAP server error: {}", e);
         }
         *imap_running.write().await = false;
+    });
+
+    // Start POP3
+    let pop3_listener = match tokio::net::TcpListener::bind(&config.pop3.listen_addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!("Failed to bind POP3 port {}: {}", config.pop3.listen_addr, e);
+            return;
+        }
+    };
+
+    let pop3s_listener = if !crate::mail_services::listener_disabled(&config.pop3.listen_addr_tls) && internal_tls.is_enabled() {
+        match tokio::net::TcpListener::bind(&config.pop3.listen_addr_tls).await {
+            Ok(l) => Some(l),
+            Err(e) => {
+                tracing::warn!("Failed to bind POP3S port {}: {}", config.pop3.listen_addr_tls, e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    let pop3_config = config.clone();
+    let pop3_db = state.db.clone();
+    let pop3_running = state.mail_services.pop3_running.clone();
+    tokio::spawn(async move {
+        *pop3_running.write().await = true;
+        let server = crate::pop3::server::Pop3Server::new(pop3_config, pop3_db);
+        if let Err(e) = server.start_with_listeners(pop3_listener, pop3s_listener).await {
+            tracing::error!("POP3 server error: {}", e);
+        }
+        *pop3_running.write().await = false;
     });
 
     tracing::info!("Mail services started dynamically");

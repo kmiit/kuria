@@ -37,6 +37,7 @@ const mailboxSummary = computed(() =>
 const serviceCards = computed(() => [
   { name: 'SMTP 服务', detail: `端口 ${settings.value?.smtp_port || 25}`, status: '运行中' },
   { name: 'IMAP 服务', detail: `端口 ${settings.value?.imap_port || 143}`, status: '运行中' },
+  { name: 'POP3 服务', detail: `端口 ${settings.value?.pop3_port || 110}`, status: '运行中' },
   { name: 'Web 服务', detail: `端口 ${settings.value?.web_port || 8080}`, status: '运行中' },
 ])
 
