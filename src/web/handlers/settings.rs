@@ -261,6 +261,21 @@ pub async fn run_setup(
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
+    // Generate DKIM key automatically
+    let selector = state.config.dkim.selector.trim();
+    let key_bits = state.config.dkim.key_size.max(2048) as usize;
+    let (domain, _dkim_selector, dkim_dns_record) =
+        crate::web::handlers::domain::generate_dkim_for_domain(
+            &state.db,
+            domain.id,
+            &domain_name,
+            selector,
+            key_bits,
+            None,
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
     queries::set_system_setting(&state.db, HOSTNAME_SETTING_KEY, &hostname)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
@@ -323,7 +338,7 @@ pub async fn run_setup(
         "dns_records": {
             "mx": format!("{}  IN  MX  10  {}", domain_name, hostname),
             "spf": format!("{}  IN  TXT  \"v=spf1 mx:{} -all\"", domain_name, domain_name),
-            "dkim": format!("After setup, open Domains and generate DKIM for {}", domain_name),
+            "dkim": dkim_dns_record,
             "dmarc": format!("_dmarc.{}  IN  TXT  \"v=DMARC1; p=quarantine; rua=mailto:admin@{}\"", domain_name, domain_name),
         }
     })))

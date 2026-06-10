@@ -7,8 +7,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use rand_core::OsRng;
 use rsa::RsaPrivateKey;
-use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding as Pkcs1LineEnding};
-use rsa::pkcs8::EncodePublicKey;
+use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding as Pkcs1LineEnding};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -29,7 +28,7 @@ fn generate_dkim_key_pair(key_bits: usize) -> anyhow::Result<DkimKeyPair> {
     let public_key = private_key.to_public_key();
 
     let private_key_pem = private_key.to_pkcs1_pem(Pkcs1LineEnding::LF)?.to_string();
-    let public_key_der = public_key.to_public_key_der()?;
+    let public_key_der = public_key.to_pkcs1_der()?;
     let public_key_dns = STANDARD.encode(public_key_der.as_bytes());
 
     Ok(DkimKeyPair {
@@ -175,6 +174,31 @@ pub async fn delete_domain(
     Ok(response::ok().1)
 }
 
+pub async fn generate_dkim_for_domain(
+    db: &sqlx::SqlitePool,
+    domain_id: i64,
+    domain_name: &str,
+    selector: &str,
+    key_bits: usize,
+    existing_public_key: Option<&str>,
+) -> anyhow::Result<(crate::db::models::Domain, String, String)> {
+    let selector = build_dkim_selector(selector, existing_public_key);
+    let key_pair = generate_distinct_dkim_key_pair(key_bits, existing_public_key)?;
+
+    let updated_domain = queries::update_domain_dkim(
+        db,
+        domain_id,
+        &selector,
+        &key_pair.private_key_pem,
+        &key_pair.public_key_dns,
+    )
+    .await?;
+
+    let dns_record = generate_dkim_dns_record(&selector, domain_name, &key_pair.public_key_dns);
+
+    Ok((updated_domain, selector, dns_record))
+}
+
 pub async fn generate_dkim(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
@@ -198,23 +222,17 @@ pub async fn generate_dkim(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let selector = build_dkim_selector(selector, domain.dkim_public_key.as_deref());
     let key_bits = state.config.dkim.key_size.max(2048) as usize;
-    let key_pair = generate_distinct_dkim_key_pair(key_bits, domain.dkim_public_key.as_deref())
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let updated_domain = queries::update_domain_dkim(
+    let (updated_domain, selector, dns_record) = generate_dkim_for_domain(
         &state.db,
         domain.id,
-        &selector,
-        &key_pair.private_key_pem,
-        &key_pair.public_key_dns,
+        &domain.domain_name,
+        selector,
+        key_bits,
+        domain.dkim_public_key.as_deref(),
     )
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    let dns_record =
-        generate_dkim_dns_record(&selector, &domain.domain_name, &key_pair.public_key_dns);
 
     Ok(Json(json!({
         "ok": true,
