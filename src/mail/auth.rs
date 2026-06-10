@@ -1034,10 +1034,7 @@ pub fn generate_dkim_dns_record(selector: &str, domain: &str, public_key: &str) 
         .collect::<Vec<_>>()
         .join(" ");
 
-    format!(
-        "{}._domainkey.{} IN TXT {}",
-        selector, domain, value
-    )
+    format!("{}._domainkey.{} IN TXT {}", selector, domain, value)
 }
 
 /// Generate SPF record for a domain

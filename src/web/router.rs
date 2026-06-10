@@ -105,7 +105,10 @@ pub fn create_router(
         .route("/api/users", get(user::list_users))
         .route("/api/users", post(user::create_user))
         .route("/api/users/{id}", delete(user::delete_user))
-        .route("/api/users/{id}/api-access", put(api_token::update_user_api_access))
+        .route(
+            "/api/users/{id}/api-access",
+            put(api_token::update_user_api_access),
+        )
         // Settings
         .route("/api/settings", get(settings::get_settings))
         .route("/api/settings", put(settings::update_settings))
@@ -158,11 +161,8 @@ async fn api_error_middleware(
     let body_bytes = match to_bytes(body, 1024 * 1024).await {
         Ok(bytes) => bytes,
         Err(_) => {
-            return response::error(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "Failed to read response",
-            )
-            .into_response();
+            return response::error(StatusCode::INTERNAL_SERVER_ERROR, "Failed to read response")
+                .into_response();
         }
     };
 

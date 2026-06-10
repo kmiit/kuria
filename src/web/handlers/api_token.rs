@@ -1,17 +1,23 @@
 use axum::http::StatusCode;
-use axum::{Json, extract::{Extension, Path, State}};
+use axum::{
+    Json,
+    extract::{Extension, Path, State},
+};
 use serde_json::json;
 
 use crate::db::{api_token_queries, models::CreateApiTokenRequest, queries};
 use crate::web::middleware::Claims;
-use crate::web::router::AppState;
 use crate::web::response;
+use crate::web::router::AppState;
 
 fn generate_api_token() -> String {
     use rand_core::{OsRng, RngCore};
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
-    format!("krt_{}", base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes))
+    format!(
+        "krt_{}",
+        base64::Engine::encode(&base64::engine::general_purpose::URL_SAFE_NO_PAD, bytes)
+    )
 }
 
 pub async fn create_token(
@@ -33,9 +39,10 @@ pub async fn create_token(
     }
 
     let token = generate_api_token();
-    let api_token = api_token_queries::create_api_token(&state.db, claims.sub, &token, &payload.name)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let api_token =
+        api_token_queries::create_api_token(&state.db, claims.sub, &token, &payload.name)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(json!({
         "id": api_token.id,
@@ -95,9 +102,10 @@ pub async fn update_user_api_access(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let updated = api_token_queries::update_user_api_access(&state.db, user_id, payload.api_enabled)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let updated =
+        api_token_queries::update_user_api_access(&state.db, user_id, payload.api_enabled)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     if !updated {
         return Err(StatusCode::NOT_FOUND);
@@ -107,7 +115,11 @@ pub async fn update_user_api_access(
         let deleted_count = api_token_queries::delete_all_user_api_tokens(&state.db, user_id)
             .await
             .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-        tracing::info!("Disabled API access for user {}, deleted {} tokens", user_id, deleted_count);
+        tracing::info!(
+            "Disabled API access for user {}, deleted {} tokens",
+            user_id,
+            deleted_count
+        );
     }
 
     Ok(Json(json!({

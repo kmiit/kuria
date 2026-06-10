@@ -1,6 +1,6 @@
+pub mod api_token_queries;
 pub mod models;
 pub mod queries;
-pub mod api_token_queries;
 
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
@@ -172,9 +172,11 @@ pub async fn run_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
         .execute(pool)
         .await?;
 
-    sqlx::query(r#"
+    sqlx::query(
+        r#"
         ALTER TABLE users ADD COLUMN api_enabled BOOLEAN DEFAULT TRUE
-    "#)
+    "#,
+    )
     .execute(pool)
     .await
     .ok();

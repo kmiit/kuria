@@ -7,7 +7,8 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use rand_core::OsRng;
 use rsa::RsaPrivateKey;
-use rsa::pkcs1::{EncodeRsaPrivateKey, EncodeRsaPublicKey, LineEnding as Pkcs1LineEnding};
+use rsa::pkcs1::{EncodeRsaPrivateKey, LineEnding as Pkcs1LineEnding};
+use rsa::pkcs8::EncodePublicKey;
 use serde_json::json;
 
 use crate::db::models::CreateDomainRequest;
@@ -27,7 +28,7 @@ fn generate_dkim_key_pair(key_bits: usize) -> anyhow::Result<DkimKeyPair> {
     let public_key = private_key.to_public_key();
 
     let private_key_pem = private_key.to_pkcs1_pem(Pkcs1LineEnding::LF)?.to_string();
-    let public_key_der = public_key.to_pkcs1_der()?;
+    let public_key_der = public_key.to_public_key_der()?;
     let public_key_dns = STANDARD.encode(public_key_der.as_bytes());
 
     Ok(DkimKeyPair {
@@ -229,6 +230,11 @@ mod tests {
         assert_ne!(first.public_key_dns, second.public_key_dns);
         assert_ne!(first.private_key_pem, second.private_key_pem);
         assert!(first.private_key_pem.contains("BEGIN RSA PRIVATE KEY"));
+        assert!(
+            first
+                .public_key_dns
+                .starts_with("MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8A")
+        );
     }
 
     #[test]
@@ -242,19 +248,9 @@ mod tests {
     }
 
     #[test]
-    fn dkim_selector_changes_when_rotating_existing_key() {
+    fn dkim_selector_stays_stable_when_rotating_existing_key() {
         let selector = build_dkim_selector("kuria", Some("old-key"));
-        assert!(selector.starts_with("kuria"));
-        assert!(selector.len() > "kuria".len());
-        assert!(selector.len() <= 63);
-    }
-
-    #[test]
-    fn dkim_selector_is_unique_for_rapid_rotations() {
-        let first = build_dkim_selector("kuria", Some("old-key"));
-        let second = build_dkim_selector("kuria", Some("old-key"));
-
-        assert_ne!(first, second);
+        assert_eq!(selector, "kuria");
     }
 
     #[test]

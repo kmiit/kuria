@@ -258,7 +258,7 @@ function dnsRecords(domain) {
       dnsType: 'TXT',
       host: dkimHost(domain),
       value: dkim,
-      line: dkim ? zoneLine(domain, dkimHost(domain), 'TXT', `"${dkim}"`) : '',
+      line: dkim ? zoneLine(domain, dkimHost(domain), 'TXT', quoteTxt(dkim)) : '',
       ready: Boolean(dkim),
       note: dkim
         ? `selector ${dkimSelector(domain)}，key hash ${fingerprint}`

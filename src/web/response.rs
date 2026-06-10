@@ -1,5 +1,5 @@
-use axum::http::StatusCode;
 use axum::Json;
+use axum::http::StatusCode;
 use serde_json::json;
 
 /// Standard success response with data
@@ -14,7 +14,10 @@ pub fn ok() -> (StatusCode, Json<serde_json::Value>) {
 }
 
 /// Standard error response with message and status code
-pub fn error(status: StatusCode, message: impl Into<String>) -> (StatusCode, Json<serde_json::Value>) {
+pub fn error(
+    status: StatusCode,
+    message: impl Into<String>,
+) -> (StatusCode, Json<serde_json::Value>) {
     (
         status,
         Json(json!({
