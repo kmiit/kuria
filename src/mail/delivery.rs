@@ -4,6 +4,7 @@ use tracing::info;
 
 use crate::config::Config;
 use crate::db::queries;
+use crate::mail::compose::{ComposedAttachment, save_composed_attachments};
 use crate::smtp::sender::{MailSender, RawComposedMessage};
 
 pub struct MailDelivery {
@@ -20,6 +21,7 @@ pub struct ComposedEmail<'a> {
     pub subject: &'a str,
     pub body_text: Option<&'a str>,
     pub body_html: Option<&'a str>,
+    pub attachments: &'a [ComposedAttachment],
 }
 
 impl MailDelivery {
@@ -47,23 +49,28 @@ impl MailDelivery {
                 subject: message.subject,
                 body_text: message.body_text,
                 body_html: message.body_html,
+                attachments: message.attachments,
             })
             .await?;
         let visible_recipients = visible_recipients_json(message.to, message.cc);
         for local_user in local_recipients {
-            queries::save_email(
+            let email = queries::save_email(
                 &self.db,
-                None,
-                message.from,
-                &visible_recipients,
-                Some(message.subject),
-                message.body_text,
-                message.body_html,
-                Some(&sent_raw_message),
-                local_user.id,
-                "INBOX",
+                queries::NewEmail {
+                    message_id: None,
+                    sender: message.from,
+                    recipients: &visible_recipients,
+                    subject: Some(message.subject),
+                    body_text: message.body_text,
+                    body_html: message.body_html,
+                    raw_message: Some(&sent_raw_message),
+                    user_id: local_user.id,
+                    mailbox: "INBOX",
+                    is_read: false,
+                },
             )
             .await?;
+            save_composed_attachments(&self.db, email.id, message.attachments).await?;
             info!(
                 "Email delivered locally from {} to {}",
                 message.from, local_user.email
@@ -232,6 +239,7 @@ mod tests {
                 subject: "Queued",
                 body_text: Some("Hello"),
                 body_html: None,
+                attachments: &[],
             })
             .await
             .expect("send");
@@ -275,6 +283,7 @@ mod tests {
                 subject: "Local",
                 body_text: Some("Hello local"),
                 body_html: None,
+                attachments: &[],
             })
             .await
             .expect("send");
@@ -285,6 +294,104 @@ mod tests {
         assert_eq!(inbox.len(), 1);
         assert_eq!(inbox[0].raw_message.as_deref(), Some(sent_raw.as_slice()));
         assert!(String::from_utf8_lossy(&sent_raw).contains("Subject: Local"));
+    }
+
+    #[tokio::test]
+    async fn composed_bcc_only_email_delivers_without_exposing_bcc_header() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        crate::db::run_migrations(&db).await.expect("migrations");
+        let domain = queries::create_domain(&db, "example.com")
+            .await
+            .expect("domain");
+        let user = queries::create_user(&db, "local@example.com", "hash", domain.id, false)
+            .await
+            .expect("user");
+        let delivery = MailDelivery::new(Arc::new(Config::default()), db.clone());
+        let bcc = vec!["local@example.com".to_string()];
+
+        let sent_raw = delivery
+            .send_composed_email(ComposedEmail {
+                from: "sender@example.com",
+                to: &[],
+                cc: &[],
+                bcc: &bcc,
+                subject: "Bcc only",
+                body_text: Some("Hidden recipient"),
+                body_html: None,
+                attachments: &[],
+            })
+            .await
+            .expect("send");
+
+        let inbox = queries::get_emails_for_imap(&db, user.id, "INBOX")
+            .await
+            .expect("inbox");
+        assert_eq!(inbox.len(), 1);
+        assert_eq!(inbox[0].recipients, "[]");
+
+        let raw = String::from_utf8_lossy(&sent_raw);
+        assert!(raw.contains("Subject: Bcc only"));
+        assert!(!raw.contains("Bcc:"));
+        assert!(!raw.contains("local@example.com"));
+    }
+
+    #[tokio::test]
+    async fn composed_local_email_saves_attachment_records() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        crate::db::run_migrations(&db).await.expect("migrations");
+        let domain = queries::create_domain(&db, "example.com")
+            .await
+            .expect("domain");
+        let user = queries::create_user(&db, "local@example.com", "hash", domain.id, false)
+            .await
+            .expect("user");
+        let delivery = MailDelivery::new(Arc::new(Config::default()), db.clone());
+        let to = vec!["local@example.com".to_string()];
+        let attachments = vec![ComposedAttachment {
+            filename: "note.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            data: b"attached body".to_vec(),
+        }];
+
+        delivery
+            .send_composed_email(ComposedEmail {
+                from: "sender@example.com",
+                to: &to,
+                cc: &[],
+                bcc: &[],
+                subject: "Attachment",
+                body_text: Some("See attachment"),
+                body_html: None,
+                attachments: &attachments,
+            })
+            .await
+            .expect("send");
+
+        let inbox = queries::get_emails_for_imap(&db, user.id, "INBOX")
+            .await
+            .expect("inbox");
+        let saved_attachments = queries::get_attachments_by_email(&db, inbox[0].id)
+            .await
+            .expect("attachments");
+
+        assert_eq!(saved_attachments.len(), 1);
+        assert_eq!(saved_attachments[0].filename.as_deref(), Some("note.txt"));
+        assert_eq!(
+            saved_attachments[0].content_type.as_deref(),
+            Some("text/plain")
+        );
+        assert_eq!(
+            saved_attachments[0].data.as_deref(),
+            Some(b"attached body".as_slice())
+        );
     }
 
     #[tokio::test]
@@ -311,6 +418,7 @@ mod tests {
                 subject: "Grouped",
                 body_text: Some("Hello"),
                 body_html: None,
+                attachments: &[],
             })
             .await
             .expect("send");

@@ -15,18 +15,11 @@ pub fn parse_email(raw: &[u8]) -> anyhow::Result<ParsedEmail> {
     let sender = message
         .from()
         .and_then(|f| f.first())
-        .map(|a| format!("{} <{}>", a.name().unwrap_or(""), a.address().unwrap_or("")))
+        .map(|a| format_address(a.name(), a.address()))
         .unwrap_or_default();
 
-    let recipients: Vec<String> = message
-        .to()
-        .map(|addrs| {
-            addrs
-                .iter()
-                .map(|a| format!("{} <{}>", a.name().unwrap_or(""), a.address().unwrap_or("")))
-                .collect()
-        })
-        .unwrap_or_default();
+    let mut recipients = collect_addresses(message.to());
+    recipients.extend(collect_addresses(message.cc()));
 
     let subject = message.subject().map(|s| s.to_string());
 
@@ -60,6 +53,28 @@ pub fn parse_email(raw: &[u8]) -> anyhow::Result<ParsedEmail> {
     })
 }
 
+fn format_address(name: Option<&str>, address: Option<&str>) -> String {
+    let name = name.unwrap_or_default().trim();
+    let address = address.unwrap_or_default().trim();
+
+    match (name.is_empty(), address.is_empty()) {
+        (_, true) => name.to_string(),
+        (true, false) => address.to_string(),
+        (false, false) => format!("{} <{}>", name, address),
+    }
+}
+
+fn collect_addresses(addresses: Option<&mail_parser::Address<'_>>) -> Vec<String> {
+    addresses
+        .map(|addrs| {
+            addrs
+                .iter()
+                .map(|a| format_address(a.name(), a.address()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 #[derive(Debug)]
 pub struct ParsedEmail {
     pub sender: String,
@@ -91,5 +106,36 @@ mod tests {
         .expect("parsed");
 
         assert_eq!(parsed.from_address.as_deref(), Some("user@example.com"));
+        assert_eq!(parsed.sender, "User <User@Example.COM>");
+        assert_eq!(parsed.recipients, vec!["dest@example.com".to_string()]);
+    }
+
+    #[test]
+    fn parse_email_recipients_include_cc_but_not_bcc() {
+        let parsed = parse_email(
+            b"From: sender@example.com\r\nTo: dest@example.com\r\nCc: Copy <copy@example.com>\r\nBcc: hidden@example.com\r\nSubject: Hi\r\n\r\nBody",
+        )
+        .expect("parsed");
+
+        assert_eq!(
+            parsed.recipients,
+            vec![
+                "dest@example.com".to_string(),
+                "Copy <copy@example.com>".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn format_address_omits_empty_display_name() {
+        assert_eq!(
+            format_address(None, Some("user@example.com")),
+            "user@example.com"
+        );
+        assert_eq!(
+            format_address(Some("User"), Some("user@example.com")),
+            "User <user@example.com>"
+        );
+        assert_eq!(format_address(Some("User"), None), "User");
     }
 }

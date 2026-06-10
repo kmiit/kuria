@@ -1,4 +1,5 @@
 use axum::body::{Body, to_bytes};
+use axum::extract::DefaultBodyLimit;
 use axum::http::{StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{any, delete, get, post, put};
@@ -73,9 +74,14 @@ pub fn create_router(
         .route("/api/emails/{id}", get(mailbox::get_email))
         .route("/api/emails/{id}", delete(mailbox::delete_email))
         .route("/api/emails/{id}/read", put(mailbox::mark_read))
+        .route("/api/emails/{id}/unread", put(mailbox::mark_unread))
         .route("/api/emails/{id}/move", put(mailbox::move_email))
         .route("/api/emails/send", post(mailbox::send_email))
         .route("/api/emails/mailboxes", get(mailbox::get_mailbox_counts))
+        .route("/api/trash", delete(mailbox::empty_trash))
+        .route("/api/drafts", post(mailbox::save_draft))
+        .route("/api/drafts/{id}", get(mailbox::get_draft))
+        .route("/api/drafts/{id}", delete(mailbox::delete_draft))
         .route("/api/attachments/{id}", get(mailbox::download_attachment))
         // Domains
         .route("/api/domains", get(domain::list_domains))
@@ -111,6 +117,7 @@ pub fn create_router(
             state.clone(),
             plugin_middleware,
         ))
+        .layer(DefaultBodyLimit::max(40 * 1024 * 1024))
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state)

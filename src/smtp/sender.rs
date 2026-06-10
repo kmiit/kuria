@@ -2,7 +2,7 @@ use hickory_resolver::TokioResolver;
 use hickory_resolver::proto::rr::RData;
 use lettre::address::{Address, Envelope};
 use lettre::message::{
-    Mailbox, Message,
+    Attachment as LettreAttachment, Mailbox, Message, MultiPart, SinglePart,
     dkim::{DkimConfig, DkimSigningAlgorithm, DkimSigningKey},
     header::ContentType,
 };
@@ -13,6 +13,7 @@ use tracing::{debug, info, warn};
 
 use crate::config::Config;
 use crate::error::KuriaError;
+use crate::mail::compose::ComposedAttachment;
 
 pub struct MailSender {
     config: Arc<Config>,
@@ -27,6 +28,7 @@ pub struct RawComposedMessage<'a> {
     pub subject: &'a str,
     pub body_text: Option<&'a str>,
     pub body_html: Option<&'a str>,
+    pub attachments: &'a [ComposedAttachment],
 }
 
 impl MailSender {
@@ -83,7 +85,12 @@ impl MailSender {
             builder = builder.cc(mailbox);
         }
 
-        let mut built_message = build_message_body(builder, message.body_text, message.body_html)?;
+        let mut built_message = build_message_body(
+            builder,
+            message.body_text,
+            message.body_html,
+            message.attachments,
+        )?;
         self.sign_message_if_configured(message.from, &mut built_message)
             .await;
         Ok(built_message.formatted())
@@ -238,35 +245,67 @@ fn build_message_body(
     builder: lettre::message::MessageBuilder,
     body_text: Option<&str>,
     body_html: Option<&str>,
+    attachments: &[ComposedAttachment],
 ) -> anyhow::Result<Message> {
-    let message = if let Some(html) = body_html {
-        if let Some(text) = body_text {
-            builder.multipart(
-                lettre::message::MultiPart::alternative()
-                    .singlepart(
-                        lettre::message::SinglePart::builder()
-                            .header(ContentType::TEXT_PLAIN)
-                            .body(text.to_string()),
-                    )
-                    .singlepart(
-                        lettre::message::SinglePart::builder()
-                            .header(ContentType::TEXT_HTML)
-                            .body(html.to_string()),
-                    ),
-            )
+    let message = if attachments.is_empty() {
+        if let Some(html) = body_html {
+            if let Some(text) = body_text {
+                builder.multipart(build_alternative_body(text, html))
+            } else {
+                builder
+                    .header(ContentType::TEXT_HTML)
+                    .body(html.to_string())
+            }
         } else {
             builder
-                .header(ContentType::TEXT_HTML)
-                .body(html.to_string())
+                .header(ContentType::TEXT_PLAIN)
+                .body(body_text.unwrap_or("").to_string())
         }
     } else {
-        builder
-            .header(ContentType::TEXT_PLAIN)
-            .body(body_text.unwrap_or("").to_string())
+        let mut mixed = if let Some(html) = body_html {
+            if let Some(text) = body_text {
+                MultiPart::mixed().multipart(build_alternative_body(text, html))
+            } else {
+                MultiPart::mixed().singlepart(html_body_part(html))
+            }
+        } else {
+            MultiPart::mixed().singlepart(text_body_part(body_text.unwrap_or("")))
+        };
+
+        for attachment in attachments {
+            let content_type = ContentType::parse(&attachment.content_type).unwrap_or_else(|_| {
+                ContentType::parse("application/octet-stream")
+                    .expect("static fallback content type should parse")
+            });
+            mixed = mixed.singlepart(
+                LettreAttachment::new(attachment.filename.clone())
+                    .body(attachment.data.clone(), content_type),
+            );
+        }
+
+        builder.multipart(mixed)
     }
     .map_err(|e| KuriaError::Smtp(format!("Failed to build message: {}", e)))?;
 
     Ok(message)
+}
+
+fn text_body_part(text: &str) -> SinglePart {
+    SinglePart::builder()
+        .header(ContentType::TEXT_PLAIN)
+        .body(text.to_string())
+}
+
+fn html_body_part(html: &str) -> SinglePart {
+    SinglePart::builder()
+        .header(ContentType::TEXT_HTML)
+        .body(html.to_string())
+}
+
+fn build_alternative_body(text: &str, html: &str) -> MultiPart {
+    MultiPart::alternative()
+        .singlepart(text_body_part(text))
+        .singlepart(html_body_part(html))
 }
 
 fn parse_envelope_sender(from: &str) -> anyhow::Result<Option<Address>> {
@@ -293,5 +332,28 @@ mod tests {
                 .is_some()
         );
         assert!(parse_envelope_sender("bad").is_err());
+    }
+
+    #[test]
+    fn message_body_with_attachments_is_multipart_mixed() {
+        let attachments = vec![ComposedAttachment {
+            filename: "note.txt".to_string(),
+            content_type: "text/plain".to_string(),
+            data: b"attached body".to_vec(),
+        }];
+        let message = build_message_body(
+            Message::builder()
+                .from("sender@example.com".parse().expect("from"))
+                .to("recipient@example.com".parse().expect("to")),
+            Some("Plain body"),
+            None,
+            &attachments,
+        )
+        .expect("message");
+
+        let raw = String::from_utf8_lossy(&message.formatted()).to_string();
+        assert!(raw.contains("Content-Type: multipart/mixed"));
+        assert!(raw.contains("Content-Disposition: attachment; filename=\"note.txt\""));
+        assert!(raw.contains("attached body"));
     }
 }

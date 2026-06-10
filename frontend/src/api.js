@@ -107,6 +107,7 @@ export const api = {
   getEmail: (id) => request(`/api/emails/${id}`),
   deleteEmail: (id) => request(`/api/emails/${id}`, { method: 'DELETE' }),
   markRead: (id) => request(`/api/emails/${id}/read`, { method: 'PUT' }),
+  markUnread: (id) => request(`/api/emails/${id}/unread`, { method: 'PUT' }),
   moveEmail: (id, mailbox) =>
     request(`/api/emails/${id}/move`, {
       method: 'PUT',
@@ -118,6 +119,16 @@ export const api = {
       body: JSON.stringify(data),
     }),
   getMailboxCounts: () => request('/api/emails/mailboxes'),
+  emptyTrash: () => request('/api/trash', { method: 'DELETE' }),
+
+  // Drafts
+  getDraft: (id) => request(`/api/drafts/${id}`),
+  saveDraft: (data) =>
+    request('/api/drafts', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+  deleteDraft: (id) => request(`/api/drafts/${id}`, { method: 'DELETE' }),
 
   // Attachments
   downloadAttachment: (id) => requestBlob(`/api/attachments/${id}`),

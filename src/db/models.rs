@@ -43,6 +43,19 @@ pub struct Email {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct EmailSummary {
+    pub id: i64,
+    pub sender: String,
+    pub recipients: String, // JSON array
+    pub subject: Option<String>,
+    pub body_text: Option<String>,
+    pub is_read: bool,
+    pub mailbox: Option<String>,
+    pub created_at: Option<NaiveDateTime>,
+    pub attachment_count: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
 pub struct Attachment {
     pub id: i64,
     pub email_id: i64,
@@ -96,6 +109,15 @@ pub struct SendEmailRequest {
     pub subject: String,
     pub body_text: Option<String>,
     pub body_html: Option<String>,
+    pub attachments: Option<Vec<SendEmailAttachmentRequest>>,
+    pub draft_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SendEmailAttachmentRequest {
+    pub filename: String,
+    pub content_type: Option<String>,
+    pub data_base64: String,
 }
 
 #[derive(Debug, Deserialize)]

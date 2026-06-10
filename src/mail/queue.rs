@@ -102,15 +102,18 @@ impl OutboundQueueWorker {
 
         queries::save_email(
             &self.db,
-            None,
-            "MAILER-DAEMON",
-            &recipients_json,
-            Some(subject),
-            Some(&body),
-            None,
-            Some(raw.as_bytes()),
-            user.id,
-            "INBOX",
+            queries::NewEmail {
+                message_id: None,
+                sender: "MAILER-DAEMON",
+                recipients: &recipients_json,
+                subject: Some(subject),
+                body_text: Some(&body),
+                body_html: None,
+                raw_message: Some(raw.as_bytes()),
+                user_id: user.id,
+                mailbox: "INBOX",
+                is_read: false,
+            },
         )
         .await?;
 

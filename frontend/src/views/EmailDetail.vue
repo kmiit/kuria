@@ -3,6 +3,7 @@ import { ref, onMounted, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { MiuixButton, MiuixCard } from 'miuix-vue'
 import { api } from '../api'
+import { notifyMailboxCountsChanged } from '../mailboxEvents'
 
 const router = useRouter()
 const route = useRoute()
@@ -18,7 +19,6 @@ const moveTarget = ref('')
 const mailboxes = [
   { id: 'INBOX', name: '收件箱' },
   { id: 'Sent', name: '已发送' },
-  { id: 'Drafts', name: '草稿' },
   { id: 'Trash', name: '垃圾箱' },
   { id: 'Spam', name: '垃圾邮件' },
 ]
@@ -50,6 +50,16 @@ function backToMailbox(mailbox = email.value?.mailbox || route.query.mailbox || 
   router.push({ path: '/inbox', query: { mailbox } })
 }
 
+function deleteActionText() {
+  if (email.value?.mailbox === 'Drafts') return '删除草稿'
+  if (email.value?.mailbox === 'Trash') return '永久删除'
+  return '删除'
+}
+
+function readActionText() {
+  return email.value?.is_read ? '标记未读' : '标记已读'
+}
+
 function formatDate(dateStr) {
   if (!dateStr) return ''
   const d = new Date(dateStr)
@@ -78,6 +88,7 @@ async function loadEmail() {
     email.value = data.email
     attachments.value = data.attachments || []
     showHtml.value = !!data.email.body_html
+    notifyMailboxCountsChanged()
   } catch (e) {
     error.value = e.message || '加载邮件失败'
   } finally {
@@ -86,20 +97,50 @@ async function loadEmail() {
 }
 
 async function handleDelete() {
-  if (!confirm('确定删除这封邮件？')) return
+  if (!email.value) return
+  const label = deleteActionText()
+  if (!confirm(`确定${label}这封邮件？`)) return
   try {
-    await api.deleteEmail(email.value.id)
+    if (email.value.mailbox === 'Drafts') {
+      await api.deleteDraft(email.value.id)
+    } else {
+      await api.deleteEmail(email.value.id)
+    }
+    notifyMailboxCountsChanged()
     backToMailbox()
   } catch (e) {
     actionMessage.value = e.message || '删除失败'
   }
 }
 
+async function handleReadToggle() {
+  if (!email.value) return
+  const isRead = !email.value.is_read
+  try {
+    if (isRead) {
+      await api.markRead(email.value.id)
+    } else {
+      await api.markUnread(email.value.id)
+    }
+    email.value = { ...email.value, is_read: isRead }
+    actionMessage.value = isRead ? '已标记为已读' : '已标记为未读'
+    notifyMailboxCountsChanged()
+  } catch (e) {
+    actionMessage.value = e.message || (isRead ? '标记已读失败' : '标记未读失败')
+  }
+}
+
 async function handleMove(mailbox) {
   if (!mailbox || !email.value) return
+  if (email.value.mailbox === 'Drafts') {
+    actionMessage.value = '草稿不能移动，请返回草稿箱继续编辑或删除'
+    moveTarget.value = ''
+    return
+  }
   try {
     await api.moveEmail(email.value.id, mailbox)
     actionMessage.value = `已移动到${mailboxName(mailbox)}`
+    notifyMailboxCountsChanged()
     backToMailbox(mailbox)
   } catch (e) {
     actionMessage.value = e.message || '移动失败'
@@ -150,9 +191,10 @@ onMounted(loadEmail)
             {{ m.name }}
           </option>
         </select>
+        <MiuixButton :disabled="!email" @click="handleReadToggle">{{ readActionText() }}</MiuixButton>
         <MiuixButton :disabled="!email" @click="replyEmail">回复</MiuixButton>
         <MiuixButton :disabled="!email" @click="forwardEmail">转发</MiuixButton>
-        <MiuixButton :disabled="!email" @click="handleDelete">删除</MiuixButton>
+        <MiuixButton :disabled="!email" @click="handleDelete">{{ deleteActionText() }}</MiuixButton>
       </div>
     </div>
 

@@ -3,6 +3,7 @@ import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute, RouterView } from 'vue-router'
 import { MiuixButton, setThemeMode } from 'miuix-vue'
 import { api } from '../api'
+import { mailboxCountsChangedEvent } from '../mailboxEvents'
 
 const router = useRouter()
 const route = useRoute()
@@ -88,6 +89,7 @@ onMounted(() => {
     }
   }
   mediaQuery.addEventListener('change', mediaHandler)
+  window.addEventListener(mailboxCountsChangedEvent, loadMailboxCounts)
 
   loadMailboxCounts()
 })
@@ -96,6 +98,7 @@ onUnmounted(() => {
   if (mediaQuery && mediaHandler) {
     mediaQuery.removeEventListener('change', mediaHandler)
   }
+  window.removeEventListener(mailboxCountsChangedEvent, loadMailboxCounts)
 })
 
 // Reload counts when navigating to inbox

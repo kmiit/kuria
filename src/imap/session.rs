@@ -416,6 +416,10 @@ where
                     send_str(&mut writer, tag, "NO Unknown destination mailbox").await?;
                     continue;
                 };
+                if !is_valid_message_destination_mailbox(destination) {
+                    send_str(&mut writer, tag, "NO Drafts cannot be used as destination").await?;
+                    continue;
+                }
                 let uid = require_user_id(user_id)?;
                 let mailbox = require_selected_mailbox(&selected_mailbox)?;
                 let emails = messages_for_sequence(&db, uid, mailbox, &sequence, false).await?;
@@ -434,6 +438,10 @@ where
                     send_str(&mut writer, tag, "NO Unknown destination mailbox").await?;
                     continue;
                 };
+                if !is_valid_message_destination_mailbox(destination) {
+                    send_str(&mut writer, tag, "NO Drafts cannot be used as destination").await?;
+                    continue;
+                }
                 let uid = require_user_id(user_id)?;
                 let mailbox = require_selected_mailbox(&selected_mailbox)?;
                 let emails = messages_for_sequence(&db, uid, mailbox, &sequence, true).await?;
@@ -452,8 +460,16 @@ where
                     send_str(&mut writer, tag, "NO Unknown destination mailbox").await?;
                     continue;
                 };
+                if !is_valid_message_destination_mailbox(destination) {
+                    send_str(&mut writer, tag, "NO Drafts cannot be used as destination").await?;
+                    continue;
+                }
                 let uid = require_user_id(user_id)?;
                 let mailbox = require_selected_mailbox(&selected_mailbox)?;
+                if is_drafts_mailbox(mailbox) {
+                    send_str(&mut writer, tag, "NO Draft messages cannot be moved").await?;
+                    continue;
+                }
                 let emails = messages_for_sequence(&db, uid, mailbox, &sequence, false).await?;
                 move_messages_to_mailbox(&db, &emails, destination).await?;
                 send_str(&mut writer, tag, "OK MOVE completed").await?;
@@ -467,8 +483,16 @@ where
                     send_str(&mut writer, tag, "NO Unknown destination mailbox").await?;
                     continue;
                 };
+                if !is_valid_message_destination_mailbox(destination) {
+                    send_str(&mut writer, tag, "NO Drafts cannot be used as destination").await?;
+                    continue;
+                }
                 let uid = require_user_id(user_id)?;
                 let mailbox = require_selected_mailbox(&selected_mailbox)?;
+                if is_drafts_mailbox(mailbox) {
+                    send_str(&mut writer, tag, "NO Draft messages cannot be moved").await?;
+                    continue;
+                }
                 let emails = messages_for_sequence(&db, uid, mailbox, &sequence, true).await?;
                 move_messages_to_mailbox(&db, &emails, destination).await?;
                 send_str(&mut writer, tag, "OK UID MOVE completed").await?;
@@ -806,26 +830,26 @@ where
 
     let email = queries::save_email(
         db,
-        parsed
-            .as_ref()
-            .and_then(|parsed| parsed.message_id.as_deref()),
-        sender,
-        &recipients_json,
-        parsed.as_ref().and_then(|parsed| parsed.subject.as_deref()),
-        parsed
-            .as_ref()
-            .and_then(|parsed| parsed.body_text.as_deref()),
-        parsed
-            .as_ref()
-            .and_then(|parsed| parsed.body_html.as_deref()),
-        Some(&raw),
-        user_id,
-        &command.mailbox,
+        queries::NewEmail {
+            message_id: parsed
+                .as_ref()
+                .and_then(|parsed| parsed.message_id.as_deref()),
+            sender,
+            recipients: &recipients_json,
+            subject: parsed.as_ref().and_then(|parsed| parsed.subject.as_deref()),
+            body_text: parsed
+                .as_ref()
+                .and_then(|parsed| parsed.body_text.as_deref()),
+            body_html: parsed
+                .as_ref()
+                .and_then(|parsed| parsed.body_html.as_deref()),
+            raw_message: Some(raw.as_slice()),
+            user_id,
+            mailbox: &command.mailbox,
+            is_read: is_seen,
+        },
     )
     .await?;
-    if is_seen {
-        queries::set_email_read(db, email.id, true).await?;
-    }
 
     if let Some(parsed) = parsed {
         for attachment in parsed.attachments {
@@ -1567,6 +1591,14 @@ fn canonical_mailbox_name(value: &str) -> Option<&'static str> {
         .find(|mailbox| mailbox.eq_ignore_ascii_case(value))
 }
 
+fn is_drafts_mailbox(value: &str) -> bool {
+    value.eq_ignore_ascii_case(crate::imap::mailbox::DRAFTS)
+}
+
+fn is_valid_message_destination_mailbox(value: &str) -> bool {
+    !is_drafts_mailbox(value)
+}
+
 fn quote_mailbox(value: &str) -> String {
     if value
         .bytes()
@@ -1890,15 +1922,14 @@ mod tests {
             .expect("user");
         queries::save_email(
             &db,
-            Some("<move@example.com>"),
-            "sender@example.net",
-            r#"["user@example.com"]"#,
-            Some("move me"),
-            Some("body"),
-            None,
-            Some(b"Subject: move me\r\n\r\nbody"),
-            user.id,
-            "INBOX",
+            test_new_email(
+                user.id,
+                Some("<move@example.com>"),
+                "sender@example.net",
+                Some("move me"),
+                Some("body"),
+                Some(b"Subject: move me\r\n\r\nbody"),
+            ),
         )
         .await
         .expect("email");
@@ -1937,6 +1968,108 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn copy_command_rejects_drafts_destination() {
+        let (db, user_id) = setup_imap_user().await;
+        queries::save_email(
+            &db,
+            test_new_email(
+                user_id,
+                Some("<copy-draft@example.com>"),
+                "sender@example.net",
+                Some("copy draft"),
+                Some("body"),
+                Some(b"Subject: copy draft\r\n\r\nbody"),
+            ),
+        )
+        .await
+        .expect("email");
+
+        let mut input = tokio::io::BufReader::new(
+            b"a1 LOGIN user@example.com pass\r\na2 SELECT INBOX\r\na3 COPY 1 Drafts\r\na4 LOGOUT\r\n"
+                .as_slice(),
+        );
+        let mut output = Vec::new();
+        handle_imap_session(
+            &mut input,
+            &mut output,
+            Arc::new(Config::default()),
+            db.clone(),
+            tls_imap_options(),
+        )
+        .await
+        .expect("session");
+        let output = String::from_utf8(output).expect("utf8");
+
+        assert!(output.contains("a3 NO Drafts cannot be used as destination"));
+        assert_eq!(
+            queries::get_emails_for_imap(&db, user_id, "INBOX")
+                .await
+                .expect("inbox")
+                .len(),
+            1
+        );
+        assert!(
+            queries::get_emails_for_imap(&db, user_id, "Drafts")
+                .await
+                .expect("drafts")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn move_command_rejects_selected_draft_messages() {
+        let (db, user_id) = setup_imap_user().await;
+        queries::save_email(
+            &db,
+            queries::NewEmail {
+                message_id: Some("<move-draft@example.com>"),
+                sender: "sender@example.net",
+                recipients: r#"["user@example.com"]"#,
+                subject: Some("draft"),
+                body_text: Some("body"),
+                body_html: None,
+                raw_message: Some(b"Subject: draft\r\n\r\nbody"),
+                user_id,
+                mailbox: "Drafts",
+                is_read: true,
+            },
+        )
+        .await
+        .expect("draft");
+
+        let mut input = tokio::io::BufReader::new(
+            b"a1 LOGIN user@example.com pass\r\na2 SELECT Drafts\r\na3 MOVE 1 Trash\r\na4 LOGOUT\r\n"
+                .as_slice(),
+        );
+        let mut output = Vec::new();
+        handle_imap_session(
+            &mut input,
+            &mut output,
+            Arc::new(Config::default()),
+            db.clone(),
+            tls_imap_options(),
+        )
+        .await
+        .expect("session");
+        let output = String::from_utf8(output).expect("utf8");
+
+        assert!(output.contains("a3 NO Draft messages cannot be moved"));
+        assert_eq!(
+            queries::get_emails_for_imap(&db, user_id, "Drafts")
+                .await
+                .expect("drafts")
+                .len(),
+            1
+        );
+        assert!(
+            queries::get_emails_for_imap(&db, user_id, "Trash")
+                .await
+                .expect("trash")
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
     async fn deleted_messages_remain_until_expunge() {
         let db = sqlx::sqlite::SqlitePoolOptions::new()
             .max_connections(1)
@@ -1953,15 +2086,14 @@ mod tests {
             .expect("user");
         queries::save_email(
             &db,
-            Some("<delete@example.com>"),
-            "sender@example.net",
-            r#"["user@example.com"]"#,
-            Some("delete me"),
-            Some("body"),
-            None,
-            Some(b"Subject: delete me\r\n\r\nbody"),
-            user.id,
-            "INBOX",
+            test_new_email(
+                user.id,
+                Some("<delete@example.com>"),
+                "sender@example.net",
+                Some("delete me"),
+                Some("body"),
+                Some(b"Subject: delete me\r\n\r\nbody"),
+            ),
         )
         .await
         .expect("email");
@@ -2024,49 +2156,46 @@ mod tests {
         let (db, user_id) = setup_imap_user().await;
         let first = queries::save_email(
             &db,
-            Some("<search-1@example.com>"),
-            "Alice <alice@example.net>",
-            r#"["user@example.com"]"#,
-            Some("Quarterly Report"),
-            Some("Needle in the body"),
-            None,
-            Some(
-                b"From: Alice <alice@example.net>\r\nTo: user@example.com\r\nSubject: Quarterly Report\r\n\r\nNeedle in the body",
+            test_new_email(
+                user_id,
+                Some("<search-1@example.com>"),
+                "Alice <alice@example.net>",
+                Some("Quarterly Report"),
+                Some("Needle in the body"),
+                Some(
+                    b"From: Alice <alice@example.net>\r\nTo: user@example.com\r\nSubject: Quarterly Report\r\n\r\nNeedle in the body",
+                ),
             ),
-            user_id,
-            "INBOX",
         )
         .await
         .expect("first email");
         let second = queries::save_email(
             &db,
-            Some("<search-2@example.com>"),
-            "Bob <bob@example.net>",
-            r#"["user@example.com"]"#,
-            Some("Different Subject"),
-            Some("Needle in a read message"),
-            None,
-            Some(
-                b"From: Bob <bob@example.net>\r\nTo: user@example.com\r\nSubject: Different Subject\r\n\r\nNeedle in a read message",
+            test_new_email(
+                user_id,
+                Some("<search-2@example.com>"),
+                "Bob <bob@example.net>",
+                Some("Different Subject"),
+                Some("Needle in a read message"),
+                Some(
+                    b"From: Bob <bob@example.net>\r\nTo: user@example.com\r\nSubject: Different Subject\r\n\r\nNeedle in a read message",
+                ),
             ),
-            user_id,
-            "INBOX",
         )
         .await
         .expect("second email");
         let third = queries::save_email(
             &db,
-            Some("<search-3@example.com>"),
-            "Carol <carol@example.net>",
-            r#"["user@example.com"]"#,
-            Some("Deleted Subject"),
-            Some("Deleted body"),
-            None,
-            Some(
-                b"From: Carol <carol@example.net>\r\nTo: user@example.com\r\nSubject: Deleted Subject\r\n\r\nDeleted body",
+            test_new_email(
+                user_id,
+                Some("<search-3@example.com>"),
+                "Carol <carol@example.net>",
+                Some("Deleted Subject"),
+                Some("Deleted body"),
+                Some(
+                    b"From: Carol <carol@example.net>\r\nTo: user@example.com\r\nSubject: Deleted Subject\r\n\r\nDeleted body",
+                ),
             ),
-            user_id,
-            "INBOX",
         )
         .await
         .expect("third email");
@@ -2130,15 +2259,14 @@ mod tests {
             .expect("user");
         queries::save_email(
             &db,
-            Some("<fetch@example.com>"),
-            "sender@example.net",
-            r#"["user@example.com"]"#,
-            Some("Fetch me"),
-            Some("Body line"),
-            None,
-            Some(b"From: sender@example.net\r\nSubject: Fetch me\r\n\r\nBody line\r\n"),
-            user.id,
-            "INBOX",
+            test_new_email(
+                user.id,
+                Some("<fetch@example.com>"),
+                "sender@example.net",
+                Some("Fetch me"),
+                Some("Body line"),
+                Some(b"From: sender@example.net\r\nSubject: Fetch me\r\n\r\nBody line\r\n"),
+            ),
         )
         .await
         .expect("email");
@@ -2186,6 +2314,28 @@ mod tests {
 
     fn tls_imap_options() -> ImapSessionOptions {
         ImapSessionOptions::new("127.0.0.1:143", true, false, false)
+    }
+
+    fn test_new_email<'a>(
+        user_id: i64,
+        message_id: Option<&'a str>,
+        sender: &'a str,
+        subject: Option<&'a str>,
+        body_text: Option<&'a str>,
+        raw_message: Option<&'a [u8]>,
+    ) -> queries::NewEmail<'a> {
+        queries::NewEmail {
+            message_id,
+            sender,
+            recipients: r#"["user@example.com"]"#,
+            subject,
+            body_text,
+            body_html: None,
+            raw_message,
+            user_id,
+            mailbox: "INBOX",
+            is_read: false,
+        }
     }
 
     fn test_email(id: i64, is_read: bool, is_deleted: bool) -> Email {

@@ -3,6 +3,7 @@ import { ref, onMounted, watch, computed } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { MiuixButton, MiuixCard, MiuixInput } from 'miuix-vue'
 import { api } from '../api'
+import { notifyMailboxCountsChanged } from '../mailboxEvents'
 
 const router = useRouter()
 const route = useRoute()
@@ -26,9 +27,13 @@ const mailboxTabs = [
   { id: 'Trash', name: '垃圾箱', icon: '🗑️' },
   { id: 'Spam', name: '垃圾邮件', icon: '⚠️' },
 ]
+const moveTargetTabs = mailboxTabs.filter((mailbox) => mailbox.id !== 'Drafts')
 
 const totalPages = computed(() => Math.ceil(total.value / perPage) || 1)
 const selectedCount = computed(() => selectedIds.value.length)
+const selectedEmails = computed(() =>
+  emails.value.filter((email) => selectedIds.value.includes(email.id)),
+)
 const allSelected = computed(() =>
   emails.value.length > 0 && selectedIds.value.length === emails.value.length,
 )
@@ -37,6 +42,12 @@ const pageEnd = computed(() => Math.min(page.value * perPage, total.value))
 const currentMailboxLabel = computed(() =>
   mailboxTabs.find((m) => m.id === currentMailbox.value)?.name || '收件箱',
 )
+const bulkDeleteActionText = computed(() => {
+  if (!selectedEmails.value.length) return deleteActionText()
+  const mailboxes = new Set(selectedEmails.value.map((email) => mailboxOf(email)))
+  if (mailboxes.size === 1) return deleteActionText(selectedEmails.value[0])
+  return '删除所选'
+})
 
 async function loadEmails() {
   loading.value = true
@@ -62,18 +73,71 @@ async function loadEmails() {
 }
 
 function openEmail(email) {
+  if (email.mailbox === 'Drafts') {
+    router.push({ path: '/compose', query: { draft: email.id } })
+    return
+  }
   router.push(`/email/${email.id}`)
 }
 
-async function deleteEmail(id) {
-  if (!confirm('确定删除这封邮件？')) return
+function mailboxOf(email) {
+  return email?.mailbox || currentMailbox.value
+}
+
+function deleteActionText(email = null) {
+  const mailbox = mailboxOf(email)
+  if (mailbox === 'Drafts') return '删除草稿'
+  if (mailbox === 'Trash') return '永久删除'
+  return '删除'
+}
+
+async function deleteEmail(email) {
+  const label = deleteActionText(email)
+  if (!confirm(`确定${label}这封邮件？`)) return
   try {
-    await api.deleteEmail(id)
-    emails.value = emails.value.filter((e) => e.id !== id)
-    selectedIds.value = selectedIds.value.filter((selected) => selected !== id)
+    if (mailboxOf(email) === 'Drafts') {
+      await api.deleteDraft(email.id)
+    } else {
+      await api.deleteEmail(email.id)
+    }
+    emails.value = emails.value.filter((e) => e.id !== email.id)
+    selectedIds.value = selectedIds.value.filter((selected) => selected !== email.id)
     total.value = Math.max(0, total.value - 1)
+    notifyMailboxCountsChanged()
   } catch (e) {
     error.value = e.message || '删除失败'
+  }
+}
+
+async function emptyTrash() {
+  if (currentMailbox.value !== 'Trash' || searchQuery.value || total.value === 0) return
+  if (!confirm(`确定永久删除垃圾箱中的 ${total.value} 封邮件？`)) return
+  try {
+    await api.emptyTrash()
+    emails.value = []
+    selectedIds.value = []
+    total.value = 0
+    page.value = 1
+    notifyMailboxCountsChanged()
+  } catch (e) {
+    error.value = e.message || '清空垃圾箱失败'
+  }
+}
+
+async function markEmailReadState(email, isRead) {
+  if (!email || email.is_read === isRead) return
+  try {
+    if (isRead) {
+      await api.markRead(email.id)
+    } else {
+      await api.markUnread(email.id)
+    }
+    emails.value = emails.value.map((item) =>
+      item.id === email.id ? { ...item, is_read: isRead } : item,
+    )
+    notifyMailboxCountsChanged()
+  } catch (e) {
+    error.value = e.message || (isRead ? '标记已读失败' : '标记未读失败')
   }
 }
 
@@ -125,8 +189,24 @@ function parseRecipients(recipients) {
 }
 
 function primaryLine(email) {
-  if (currentMailbox.value === 'Sent') return `发给 ${parseRecipients(email.recipients)}`
+  if (mailboxOf(email) === 'Sent') return `发给 ${parseRecipients(email.recipients)}`
   return email.sender
+}
+
+function readActionText(email) {
+  return email?.is_read ? '标为未读' : '标为已读'
+}
+
+function attachmentCount(email) {
+  return email?.attachment_count || 0
+}
+
+function hasAttachments(email) {
+  return email?.has_attachments || attachmentCount(email) > 0
+}
+
+function attachmentTitle(email) {
+  return `${attachmentCount(email)} 个附件`
 }
 
 function toggleSelection(id) {
@@ -149,20 +229,43 @@ async function bulkMarkRead() {
       selectedIds.value.includes(email.id) ? { ...email, is_read: true } : email,
     )
     selectedIds.value = []
+    notifyMailboxCountsChanged()
   } catch (e) {
     error.value = e.message || '标记已读失败'
   }
 }
 
+async function bulkMarkUnread() {
+  if (!selectedCount.value) return
+  try {
+    await Promise.all(selectedIds.value.map((id) => api.markUnread(id)))
+    emails.value = emails.value.map((email) =>
+      selectedIds.value.includes(email.id) ? { ...email, is_read: false } : email,
+    )
+    selectedIds.value = []
+    notifyMailboxCountsChanged()
+  } catch (e) {
+    error.value = e.message || '标记未读失败'
+  }
+}
+
 async function bulkDelete() {
   if (!selectedCount.value) return
-  if (!confirm(`确定删除选中的 ${selectedCount.value} 封邮件？`)) return
+  if (!confirm(`确定${bulkDeleteActionText.value}选中的 ${selectedCount.value} 封邮件？`)) return
   const ids = [...selectedIds.value]
   try {
-    await Promise.all(ids.map((id) => api.deleteEmail(id)))
+    const selectedEmailsForDelete = emails.value.filter((email) => ids.includes(email.id))
+    await Promise.all(
+      selectedEmailsForDelete.map((email) =>
+        mailboxOf(email) === 'Drafts'
+          ? api.deleteDraft(email.id)
+          : api.deleteEmail(email.id),
+      ),
+    )
     emails.value = emails.value.filter((email) => !ids.includes(email.id))
     total.value = Math.max(0, total.value - ids.length)
     selectedIds.value = []
+    notifyMailboxCountsChanged()
   } catch (e) {
     error.value = e.message || '批量删除失败'
   }
@@ -170,15 +273,26 @@ async function bulkDelete() {
 
 async function bulkMove() {
   if (!selectedCount.value || !bulkMoveTarget.value) return
+  if (selectedEmails.value.some((email) => mailboxOf(email) === 'Drafts')) {
+    error.value = '草稿不能移动，请打开草稿继续编辑或直接删除'
+    bulkMoveTarget.value = ''
+    return
+  }
   const ids = [...selectedIds.value]
+  const targetMailbox = bulkMoveTarget.value
   try {
-    await Promise.all(ids.map((id) => api.moveEmail(id, bulkMoveTarget.value)))
-    if (!searchQuery.value && bulkMoveTarget.value !== currentMailbox.value) {
+    await Promise.all(ids.map((id) => api.moveEmail(id, targetMailbox)))
+    if (searchQuery.value) {
+      emails.value = emails.value.map((email) =>
+        ids.includes(email.id) ? { ...email, mailbox: targetMailbox } : email,
+      )
+    } else if (targetMailbox !== currentMailbox.value) {
       emails.value = emails.value.filter((email) => !ids.includes(email.id))
       total.value = Math.max(0, total.value - ids.length)
     }
     selectedIds.value = []
     bulkMoveTarget.value = ''
+    notifyMailboxCountsChanged()
   } catch (e) {
     error.value = e.message || '移动邮件失败'
   }
@@ -214,6 +328,12 @@ watch(() => route.query.mailbox, (mb) => {
       </div>
       <div class="header-actions">
         <MiuixButton @click="loadEmails">刷新</MiuixButton>
+        <MiuixButton
+          v-if="currentMailbox === 'Trash' && !searchQuery && total > 0"
+          @click="emptyTrash"
+        >
+          清空垃圾箱
+        </MiuixButton>
         <MiuixButton type="primary" @click="router.push('/compose')">写邮件</MiuixButton>
       </div>
     </div>
@@ -251,10 +371,11 @@ watch(() => route.query.mailbox, (mb) => {
       </label>
       <div class="bulk-actions">
         <MiuixButton @click="bulkMarkRead">标记已读</MiuixButton>
+        <MiuixButton @click="bulkMarkUnread">标记未读</MiuixButton>
         <select v-model="bulkMoveTarget" class="bulk-select" @change="bulkMove">
           <option value="">移动到...</option>
           <option
-            v-for="mb in mailboxTabs"
+            v-for="mb in moveTargetTabs"
             :key="mb.id"
             :value="mb.id"
             :disabled="mb.id === currentMailbox"
@@ -262,7 +383,7 @@ watch(() => route.query.mailbox, (mb) => {
             {{ mb.name }}
           </option>
         </select>
-        <MiuixButton @click="bulkDelete">删除</MiuixButton>
+        <MiuixButton @click="bulkDelete">{{ bulkDeleteActionText }}</MiuixButton>
       </div>
     </div>
     <label v-else-if="emails.length" class="select-all idle">
@@ -299,20 +420,38 @@ watch(() => route.query.mailbox, (mb) => {
             <div class="email-content">
               <div class="email-header">
                 <span class="email-sender">{{ primaryLine(email) }}</span>
-                <span class="email-date">{{ formatDate(email.created_at) }}</span>
+                <span class="email-meta">
+                  <span
+                    v-if="hasAttachments(email)"
+                    class="attachment-indicator"
+                    :title="attachmentTitle(email)"
+                  >
+                    📎 {{ attachmentCount(email) }}
+                  </span>
+                  <span class="email-date">{{ formatDate(email.created_at) }}</span>
+                </span>
               </div>
               <div class="email-subject">{{ email.subject || '(无主题)' }}</div>
               <div class="email-preview">
                 {{ (email.body_text || '').substring(0, 140) || '无正文预览' }}
               </div>
             </div>
-            <MiuixButton
-              class="delete-btn"
-              title="删除"
-              @click.stop="deleteEmail(email.id)"
-            >
-              删除
-            </MiuixButton>
+            <div class="row-actions">
+              <MiuixButton
+                class="read-toggle-btn"
+                :title="readActionText(email)"
+                @click.stop="markEmailReadState(email, !email.is_read)"
+              >
+                {{ readActionText(email) }}
+              </MiuixButton>
+              <MiuixButton
+                class="delete-btn"
+                :title="deleteActionText(email)"
+                @click.stop="deleteEmail(email)"
+              >
+                {{ deleteActionText(email) }}
+              </MiuixButton>
+            </div>
           </div>
         </MiuixCard>
       </div>
@@ -543,6 +682,22 @@ watch(() => route.query.mailbox, (mb) => {
   flex-shrink: 0;
 }
 
+.email-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  color: var(--m-color-text-secondary);
+}
+
+.attachment-indicator {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
 .email-subject {
   font-size: 15px;
   color: var(--m-color-text);
@@ -560,15 +715,23 @@ watch(() => route.query.mailbox, (mb) => {
   text-overflow: ellipsis;
 }
 
-.delete-btn {
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
   opacity: 0;
   transition: opacity 0.2s;
   flex-shrink: 0;
 }
 
-.email-item:hover .delete-btn,
-.email-item:focus-within .delete-btn {
+.email-item:hover .row-actions,
+.email-item:focus-within .row-actions {
   opacity: 1;
+}
+
+.read-toggle-btn,
+.delete-btn {
+  white-space: nowrap;
 }
 
 .pagination {
@@ -608,7 +771,7 @@ watch(() => route.query.mailbox, (mb) => {
 
   .header-actions {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
   }
 
   .search-bar {
@@ -630,8 +793,10 @@ watch(() => route.query.mailbox, (mb) => {
     display: none;
   }
 
-  .delete-btn {
+  .row-actions {
     opacity: 1;
+    flex-direction: column;
+    align-items: stretch;
   }
 }
 </style>

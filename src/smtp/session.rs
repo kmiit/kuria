@@ -4,6 +4,7 @@ use tracing::{debug, warn};
 
 use crate::config::Config;
 use crate::db::queries;
+use crate::imap::mailbox;
 use crate::mail::auth::{SpfResult, check_dkim, check_dmarc, check_spf};
 use crate::plugin::PluginManager;
 
@@ -202,8 +203,16 @@ where
                 let final_mail_data = prepend_headers(&message_with_plugin_headers, &trace_headers);
                 let mail_data_str = String::from_utf8_lossy(&message_with_plugin_headers);
 
-                // Destination mailbox (plugin override or default)
-                let dest_mailbox = plugin_mailbox.as_deref().unwrap_or("INBOX");
+                let Some(dest_mailbox) = canonical_smtp_delivery_mailbox(plugin_mailbox.as_deref())
+                else {
+                    writer
+                        .write_all(b"550 5.6.0 Invalid plugin mailbox\r\n")
+                        .await?;
+                    sender = None;
+                    recipients.clear();
+                    mail_data.clear();
+                    continue;
+                };
 
                 let recipient_split =
                     split_local_and_external_recipients(&db, &recipients, &hostname).await;
@@ -237,18 +246,34 @@ where
                             .ok()
                             .and_then(|p| p.subject.as_deref())
                             .or(extract_subject(&mail_data_str));
+                        let recipients_json = parsed
+                            .as_ref()
+                            .ok()
+                            .map(|parsed| {
+                                serde_json::to_string(&parsed.recipients).unwrap_or_default()
+                            })
+                            .unwrap_or_else(|| "[]".to_string());
 
                         let save_result = queries::save_email(
                             &db,
-                            Some(&msg_id),
-                            sender.as_deref().unwrap_or(""),
-                            &serde_json::to_string(&recipients).unwrap_or_default(),
-                            subject,
-                            parsed.as_ref().ok().and_then(|p| p.body_text.as_deref()),
-                            parsed.as_ref().ok().and_then(|p| p.body_html.as_deref()),
-                            Some(&final_mail_data),
-                            user.id,
-                            dest_mailbox,
+                            queries::NewEmail {
+                                message_id: Some(&msg_id),
+                                sender: sender.as_deref().unwrap_or(""),
+                                recipients: &recipients_json,
+                                subject,
+                                body_text: parsed
+                                    .as_ref()
+                                    .ok()
+                                    .and_then(|p| p.body_text.as_deref()),
+                                body_html: parsed
+                                    .as_ref()
+                                    .ok()
+                                    .and_then(|p| p.body_html.as_deref()),
+                                raw_message: Some(&final_mail_data),
+                                user_id: user.id,
+                                mailbox: dest_mailbox,
+                                is_read: false,
+                            },
                         )
                         .await;
 
@@ -797,6 +822,23 @@ fn extract_address(line: &str) -> Option<String> {
     }
 }
 
+fn canonical_smtp_delivery_mailbox(value: Option<&str>) -> Option<&'static str> {
+    let value = value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(mailbox::INBOX);
+
+    let canonical_mailbox = mailbox::standard_mailboxes()
+        .into_iter()
+        .find(|standard_mailbox| standard_mailbox.eq_ignore_ascii_case(value))?;
+
+    if matches!(canonical_mailbox, mailbox::SENT | mailbox::DRAFTS) {
+        None
+    } else {
+        Some(canonical_mailbox)
+    }
+}
+
 fn extract_reverse_path(line: &str) -> Option<String> {
     let start = line.find('<')?;
     let end = line.find('>')?;
@@ -1052,6 +1094,22 @@ mod tests {
     }
 
     #[test]
+    fn plugin_mailbox_overrides_are_limited_to_delivery_mailboxes() {
+        assert_eq!(canonical_smtp_delivery_mailbox(None), Some(mailbox::INBOX));
+        assert_eq!(
+            canonical_smtp_delivery_mailbox(Some(" spam ")),
+            Some(mailbox::SPAM)
+        );
+        assert_eq!(
+            canonical_smtp_delivery_mailbox(Some("Trash")),
+            Some(mailbox::TRASH)
+        );
+        assert_eq!(canonical_smtp_delivery_mailbox(Some("Drafts")), None);
+        assert_eq!(canonical_smtp_delivery_mailbox(Some("Sent")), None);
+        assert_eq!(canonical_smtp_delivery_mailbox(Some("../INBOX")), None);
+    }
+
+    #[test]
     fn peer_ip_for_spf_removes_socket_port() {
         assert_eq!(peer_ip_for_spf("203.0.113.4:2525"), "203.0.113.4");
         assert_eq!(peer_ip_for_spf("[2001:db8::1]:2525"), "2001:db8::1");
@@ -1251,6 +1309,51 @@ mod tests {
         let raw = String::from_utf8_lossy(saved[0].raw_message.as_deref().unwrap_or_default());
         assert!(raw.starts_with("Received:"));
         assert!(raw.contains("\r\nAuthentication-Results:"));
+    }
+
+    #[tokio::test]
+    async fn smtp_delivery_stores_visible_header_recipients_not_envelope_recipients() {
+        let db = sqlx::sqlite::SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect("sqlite::memory:")
+            .await
+            .expect("sqlite pool");
+        crate::db::run_migrations(&db).await.expect("migrations");
+        let domain = queries::create_domain(&db, "example.com")
+            .await
+            .expect("domain");
+        let user = queries::create_user(&db, "hidden@example.com", "hash", domain.id, false)
+            .await
+            .expect("user");
+        let plugins = Arc::new(PluginManager::load(&Config::default()).expect("plugins"));
+        let mut input = tokio::io::BufReader::new(
+            b"MAIL FROM:<sender@example.net>\r\nRCPT TO:<hidden@example.com>\r\nDATA\r\nFrom: sender@example.net\r\nTo: visible@example.net\r\nCc: copy@example.net\r\nSubject: Header recipients\r\n\r\nBody\r\n.\r\nQUIT\r\n"
+                .as_slice(),
+        );
+        let mut output = Vec::new();
+
+        handle_smtp_session(
+            &mut input,
+            &mut output,
+            Arc::new(Config::default()),
+            db.clone(),
+            plugins,
+            tls_smtp_options(),
+        )
+        .await
+        .expect("session");
+        let output = String::from_utf8(output).expect("utf8");
+        let saved = queries::get_emails_for_imap(&db, user.id, "INBOX")
+            .await
+            .expect("emails");
+
+        assert!(output.contains("250 OK: Message accepted for delivery"));
+        assert_eq!(saved.len(), 1);
+        assert_eq!(
+            saved[0].recipients,
+            r#"["visible@example.net","copy@example.net"]"#
+        );
+        assert!(!saved[0].recipients.contains("hidden@example.com"));
     }
 
     #[test]
