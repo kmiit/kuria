@@ -79,6 +79,7 @@ pub fn create_router(
     let protected_routes = Router::new()
         // Emails
         .route("/api/emails", get(mailbox::list_emails))
+        .route("/api/emails/{id}/raw", get(mailbox::get_email_raw))
         .route("/api/emails/{id}", get(mailbox::get_email))
         .route("/api/emails/{id}", delete(mailbox::delete_email))
         .route("/api/emails/{id}/read", put(mailbox::mark_read))

@@ -761,6 +761,28 @@ pub async fn send_email(
     Ok(response::ok().1)
 }
 
+pub async fn get_email_raw(
+    State(state): State<AppState>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<i64>,
+) -> Result<impl IntoResponse, StatusCode> {
+    let email = queries::get_email_by_id(&state.db, id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+
+    if email.user_id != claims.sub {
+        return Err(StatusCode::FORBIDDEN);
+    }
+
+    let raw_message = email.raw_message.ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok((
+        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+        raw_message,
+    ))
+}
+
 pub async fn download_attachment(
     State(state): State<AppState>,
     Extension(claims): Extension<Claims>,
