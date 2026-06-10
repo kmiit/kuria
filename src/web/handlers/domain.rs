@@ -39,38 +39,13 @@ fn generate_dkim_key_pair(key_bits: usize) -> anyhow::Result<DkimKeyPair> {
 
 fn generate_distinct_dkim_key_pair(
     key_bits: usize,
-    existing_public_key: Option<&str>,
+    _existing_public_key: Option<&str>,
 ) -> anyhow::Result<DkimKeyPair> {
-    for _ in 0..3 {
-        let key_pair = generate_dkim_key_pair(key_bits)?;
-        if Some(key_pair.public_key_dns.as_str()) != existing_public_key {
-            return Ok(key_pair);
-        }
-    }
-
-    anyhow::bail!("generated DKIM public key matched the existing key")
+    generate_dkim_key_pair(key_bits)
 }
 
-fn build_dkim_selector(base_selector: &str, existing_public_key: Option<&str>) -> String {
-    if existing_public_key.is_some() {
-        let random_suffix: String = Uuid::new_v4()
-            .simple()
-            .to_string()
-            .chars()
-            .take(8)
-            .collect();
-        let suffix = format!(
-            "{}-{}",
-            chrono::Utc::now().format("%Y%m%d%H%M%S"),
-            random_suffix
-        );
-        let max_base_len = 63usize.saturating_sub(suffix.len() + 1);
-        let rotation_base: String = base_selector.chars().take(max_base_len.max(1)).collect();
-
-        format!("{}-{}", rotation_base, suffix)
-    } else {
-        base_selector.to_string()
-    }
+fn build_dkim_selector(base_selector: &str, _existing_public_key: Option<&str>) -> String {
+    base_selector.to_string()
 }
 
 fn normalize_domain(value: &str) -> String {
