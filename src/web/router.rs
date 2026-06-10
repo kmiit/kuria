@@ -22,6 +22,7 @@ pub struct AppState {
     pub db: sqlx::SqlitePool,
     pub plugins: Arc<PluginManager>,
     pub login_rate_limiter: Arc<LoginRateLimiter>,
+    pub mail_services: Arc<crate::mail_services::MailServices>,
 }
 
 async fn spa_index() -> Html<String> {
@@ -51,12 +52,14 @@ pub fn create_router(
     config: Arc<Config>,
     db: sqlx::SqlitePool,
     plugins: Arc<PluginManager>,
+    mail_services: Arc<crate::mail_services::MailServices>,
 ) -> Router {
     let state = AppState {
         config,
         db,
         plugins,
         login_rate_limiter: Arc::new(LoginRateLimiter::new()),
+        mail_services,
     };
 
     // Public routes (no auth required)

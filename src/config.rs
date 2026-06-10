@@ -90,8 +90,11 @@ pub struct PluginsConfig {
 
 impl Config {
     pub fn load(path: &str) -> anyhow::Result<Self> {
-        let content = std::fs::read_to_string(path)
-            .unwrap_or_else(|_| include_str!("../config.toml").to_string());
+        if !std::path::Path::new(path).exists() {
+            tracing::info!("Config file not found, using defaults");
+            return Ok(Self::default());
+        }
+        let content = std::fs::read_to_string(path)?;
         let mut config: Config = toml::from_str(&content)?;
         config.apply_env_overrides();
         config.harden_runtime_secrets();
@@ -164,7 +167,7 @@ impl Default for Config {
                 trust_proxy_headers: false,
             },
             database: DatabaseConfig {
-                url: "sqlite:./data/kuria.db".to_string(),
+                url: "sqlite:./data/kuria.db?mode=rwc".to_string(),
             },
             tls: TlsConfig {
                 mode: TlsMode::Auto,

@@ -3,6 +3,7 @@ mod db;
 mod error;
 mod imap;
 mod mail;
+mod mail_services;
 mod plugin;
 mod smtp;
 mod tls;
@@ -87,15 +88,10 @@ struct BoundListeners {
     smtps: Option<TcpListener>,
     imap: TcpListener,
     imaps: Option<TcpListener>,
-    web: TcpListener,
     internal_tls: InternalTlsStatus,
 }
 
-fn listener_disabled(addr: &str) -> bool {
-    addr.parse::<std::net::SocketAddr>()
-        .map(|addr| addr.port() == 0)
-        .unwrap_or(false)
-}
+pub use mail_services::listener_disabled;
 
 fn bind_error_hint(error: &std::io::Error) -> &'static str {
     match error.kind() {
@@ -149,8 +145,6 @@ async fn bind_service_listeners(config: &Config) -> anyhow::Result<BoundListener
         None
     };
 
-    let web = bind_endpoint("Web UI", &config.web.listen_addr, &mut errors).await;
-
     if !errors.is_empty() {
         anyhow::bail!(
             "端口占用检测失败，Kuria 未启动任何服务。\n{}\n请停止占用进程，或修改 config.toml 中对应的 listen_addr。",
@@ -163,7 +157,6 @@ async fn bind_service_listeners(config: &Config) -> anyhow::Result<BoundListener
         smtps,
         imap: imap.expect("IMAP listener must be bound when no errors were reported"),
         imaps,
-        web: web.expect("Web listener must be bound when no errors were reported"),
         internal_tls,
     })
 }
@@ -235,11 +228,26 @@ async fn main() -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let listeners = bind_service_listeners(&config).await?;
+    // Check if config file exists
+    let config_exists = std::path::Path::new(&cli.config).exists();
+
+    // Bind web listener first (always needed)
+    let web_listener = TcpListener::bind(&config.web.listen_addr).await?;
+
+    // Only bind mail services if config file exists
+    let mail_listeners = if config_exists {
+        Some(bind_service_listeners(&config).await?)
+    } else {
+        tracing::info!("No config file found, skipping mail service ports. Complete setup in Web UI.");
+        None
+    };
 
     // Load plugins
     let plugin_manager = Arc::new(plugin::PluginManager::load(&config)?);
     plugin_manager.call_init(&config);
+
+    // Mail services state
+    let mail_services = Arc::new(mail_services::MailServices::new());
 
     // Outbound Queue Worker
     let (queue_notifier, queue_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -259,75 +267,88 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // SMTP Server
-    let smtp_config = config.clone();
-    let smtp_db = db.clone();
-    let smtp_plugins = plugin_manager.clone();
-    let smtp_listener = listeners.smtp;
-    let smtps_enabled = listeners.smtps.is_some();
-    let smtps_listener = listeners.smtps;
-    tokio::spawn(async move {
-        let server = smtp::server::SmtpServer::new(smtp_config, smtp_db, smtp_plugins);
-        if let Err(e) = server
-            .start_with_listeners(smtp_listener, smtps_listener)
-            .await
-        {
-            tracing::error!("SMTP server error: {}", e);
-        }
-    });
+    if let Some(listeners) = mail_listeners {
+        let smtp_config = config.clone();
+        let smtp_db = db.clone();
+        let smtp_plugins = plugin_manager.clone();
+        let smtp_listener = listeners.smtp;
+        let smtps_enabled = listeners.smtps.is_some();
+        let smtps_listener = listeners.smtps;
+        let internal_tls = listeners.internal_tls;
+        let smtp_running = mail_services.smtp_running.clone();
+        tokio::spawn(async move {
+            let server = smtp::server::SmtpServer::new(smtp_config, smtp_db, smtp_plugins);
+            *smtp_running.write().await = true;
+            if let Err(e) = server
+                .start_with_listeners(smtp_listener, smtps_listener)
+                .await
+            {
+                tracing::error!("SMTP server error: {}", e);
+            }
+            *smtp_running.write().await = false;
+        });
 
-    // IMAP Server
-    let imap_config = config.clone();
-    let imap_db = db.clone();
-    let imap_listener = listeners.imap;
-    let imaps_enabled = listeners.imaps.is_some();
-    let imaps_listener = listeners.imaps;
-    tokio::spawn(async move {
-        let server = imap::server::ImapServer::new(imap_config, imap_db);
-        if let Err(e) = server
-            .start_with_listeners(imap_listener, imaps_listener)
-            .await
-        {
-            tracing::error!("IMAP server error: {}", e);
+        // IMAP Server
+        let imap_config = config.clone();
+        let imap_db = db.clone();
+        let imap_listener = listeners.imap;
+        let imaps_enabled = listeners.imaps.is_some();
+        let imaps_listener = listeners.imaps;
+        let imap_running = mail_services.imap_running.clone();
+        tokio::spawn(async move {
+            let server = imap::server::ImapServer::new(imap_config, imap_db);
+            *imap_running.write().await = true;
+            if let Err(e) = server
+                .start_with_listeners(imap_listener, imaps_listener)
+                .await
+            {
+                tracing::error!("IMAP server error: {}", e);
+            }
+            *imap_running.write().await = false;
+        });
+
+        tracing::info!("Kuria Mail Server started successfully");
+        tracing::info!("  SMTP: {}", config.smtp.listen_addr);
+        tracing::info!(
+            "  SMTPS: {}",
+            tls_listener_summary(
+                &config.smtp.listen_addr_tls,
+                smtps_enabled,
+                internal_tls
+            )
+        );
+        tracing::info!("  IMAP: {}", config.imap.listen_addr);
+        tracing::info!(
+            "  IMAPS: {}",
+            tls_listener_summary(
+                &config.imap.listen_addr_tls,
+                imaps_enabled,
+                internal_tls
+            )
+        );
+        tracing::info!("  Web:  http://{}", config.web.listen_addr);
+        tracing::info!("  Web:  http://{}", config.web.listen_addr);
+        if cfg!(debug_assertions) && is_cargo_run {
+            tracing::info!("  Frontend (HMR): http://localhost:3000");
         }
-    });
+    } else {
+        tracing::info!("Web UI started on http://{}", config.web.listen_addr);
+        tracing::info!("Mail services will start after completing setup wizard");
+    }
 
     // Web Server
     let web_config = config.clone();
     let web_db = db.clone();
     let web_plugins = plugin_manager.clone();
     let web_addr = config.web.listen_addr.clone();
-    let web_listener = listeners.web;
+    let web_mail_services = mail_services.clone();
     tokio::spawn(async move {
-        let app = web::router::create_router(web_config, web_db, web_plugins);
+        let app = web::router::create_router(web_config, web_db, web_plugins, web_mail_services);
         tracing::info!("Web UI listening on {}", web_addr);
         if let Err(e) = axum::serve(web_listener, app).await {
             tracing::error!("Web server error: {}", e);
         }
     });
-
-    tracing::info!("Kuria Mail Server started successfully");
-    tracing::info!("  SMTP: {}", config.smtp.listen_addr);
-    tracing::info!(
-        "  SMTPS: {}",
-        tls_listener_summary(
-            &config.smtp.listen_addr_tls,
-            smtps_enabled,
-            listeners.internal_tls
-        )
-    );
-    tracing::info!("  IMAP: {}", config.imap.listen_addr);
-    tracing::info!(
-        "  IMAPS: {}",
-        tls_listener_summary(
-            &config.imap.listen_addr_tls,
-            imaps_enabled,
-            listeners.internal_tls
-        )
-    );
-    tracing::info!("  Web:  http://{}", config.web.listen_addr);
-    if cfg!(debug_assertions) && is_cargo_run {
-        tracing::info!("  Frontend (HMR): http://localhost:3000");
-    }
 
     // Wait for shutdown signal
     tokio::signal::ctrl_c().await?;

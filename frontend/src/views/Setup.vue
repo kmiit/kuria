@@ -32,6 +32,10 @@ const form = ref({
   adminEmail: '',
   adminPassword: '',
   confirmPassword: '',
+  useNginxProxy: false,
+  smtpPort: '25',
+  imapPort: '143',
+  webPort: '8080',
 })
 
 const progress = computed(() => ((step.value - 1) / (steps.length - 1)) * 100)
@@ -352,6 +356,10 @@ async function runSetup() {
       domain: form.value.domain,
       admin_email: form.value.adminEmail,
       admin_password: form.value.adminPassword,
+      use_nginx_proxy: form.value.useNginxProxy,
+      smtp_port: parseInt(form.value.smtpPort) || 25,
+      imap_port: parseInt(form.value.imapPort) || 143,
+      web_port: parseInt(form.value.webPort) || 8080,
     })
 
     setupResult.value = data
@@ -419,6 +427,15 @@ function copyAllRecords() {
     error.value = '复制失败，请手动选择记录内容'
   })
 }
+
+function copyNginxConfig() {
+  if (!setupResult.value?.nginx_config) return
+  navigator.clipboard.writeText(setupResult.value.nginx_config).then(() => {
+    copiedKey.value = 'nginx'
+  }).catch(() => {
+    error.value = '复制失败，请手动选择配置内容'
+  })
+}
 </script>
 
 <template>
@@ -470,6 +487,29 @@ function copyAllRecords() {
               <MiuixInput v-model="form.domain" placeholder="example.com" />
               <small>用户邮箱会使用这个域名，例如 user@example.com。</small>
             </label>
+
+            <label class="field checkbox-field">
+              <input type="checkbox" v-model="form.useNginxProxy" />
+              <div>
+                <span>使用 Nginx 反向代理处理 TLS</span>
+                <small>推荐。由 Nginx 统一处理 TLS 证书，Kuria 只监听明文端口。完成后会生成 nginx 配置文件。</small>
+              </div>
+            </label>
+
+            <div class="form-grid ports-grid">
+              <label class="field">
+                <span>SMTP 端口</span>
+                <MiuixInput v-model="form.smtpPort" placeholder="25" />
+              </label>
+              <label class="field">
+                <span>IMAP 端口</span>
+                <MiuixInput v-model="form.imapPort" placeholder="143" />
+              </label>
+              <label class="field">
+                <span>Web 端口</span>
+                <MiuixInput v-model="form.webPort" placeholder="8080" />
+              </label>
+            </div>
           </div>
 
           <div class="preview-box">
@@ -535,6 +575,10 @@ function copyAllRecords() {
             <div>
               <span>管理员邮箱</span>
               <strong>{{ form.adminEmail }}</strong>
+            </div>
+            <div>
+              <span>TLS 模式</span>
+              <strong>{{ form.useNginxProxy ? 'Nginx 反向代理' : 'Kuria 内置 TLS' }}</strong>
             </div>
           </div>
 
@@ -624,6 +668,19 @@ function copyAllRecords() {
                 </MiuixButton>
               </div>
             </div>
+          </div>
+
+          <div v-if="setupResult?.nginx_config" class="nginx-section">
+            <div class="dns-head">
+              <div>
+                <h3>Nginx 反向代理配置</h3>
+                <p>将此配置保存为 nginx-kuria.conf，修改证书路径后包含到 Nginx 主配置中。</p>
+              </div>
+              <MiuixButton class="app-secondary-button" @click="copyNginxConfig">
+                {{ copiedKey === 'nginx' ? '已复制' : '复制配置' }}
+              </MiuixButton>
+            </div>
+            <pre class="zone-preview"><code>{{ setupResult.nginx_config }}</code></pre>
           </div>
         </div>
 
@@ -808,9 +865,33 @@ function copyAllRecords() {
   max-width: 560px;
 }
 
+.ports-grid {
+  grid-template-columns: repeat(3, 1fr);
+  gap: 12px;
+}
+
 .field {
   display: grid;
   gap: 8px;
+}
+
+.field.checkbox-field {
+  display: flex;
+  align-items: start;
+  gap: 12px;
+}
+
+.field.checkbox-field input[type="checkbox"] {
+  margin-top: 2px;
+  width: 18px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.field.checkbox-field > div {
+  flex: 1;
+  display: grid;
+  gap: 4px;
 }
 
 .field span {
@@ -845,6 +926,13 @@ function copyAllRecords() {
   border-radius: var(--app-radius);
   background: var(--m-color-bg);
   color: var(--m-color-text-secondary);
+}
+
+.restart-notice {
+  background: #fff8e6;
+  color: #8b6914;
+  border: 1px solid #ffd666;
+  font-weight: 500;
 }
 
 .preview-box {
@@ -899,7 +987,8 @@ code {
   margin-bottom: 22px;
 }
 
-.dns-section {
+.dns-section,
+.nginx-section {
   margin-top: 18px;
 }
 
