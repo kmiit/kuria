@@ -842,7 +842,7 @@ async fn save_config_file(payload: &SetupRequest, base_config: &crate::config::C
     } else {
         use std::time::{SystemTime, UNIX_EPOCH};
         let timestamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-        config.web.jwt_secret = format!("kuria-{:x}-{}", timestamp, std::process::id());
+        config.web.jwt_secret = format!("kuria-auto-{:032x}", timestamp);
     }
 
     if payload.use_nginx_proxy.unwrap_or(false) {

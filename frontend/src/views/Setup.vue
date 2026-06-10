@@ -37,6 +37,7 @@ const form = ref({
   imapPort: '143',
   pop3Port: '110',
   webPort: '8080',
+  jwtSecret: '',
 })
 
 const progress = computed(() => ((step.value - 1) / (steps.length - 1)) * 100)
@@ -362,6 +363,7 @@ async function runSetup() {
       imap_port: parseInt(form.value.imapPort) || 143,
       pop3_port: parseInt(form.value.pop3Port) || 110,
       web_port: parseInt(form.value.webPort) || 8080,
+      jwt_secret: form.value.jwtSecret || undefined,
     })
 
     setupResult.value = data
@@ -558,6 +560,12 @@ function copyNginxConfig() {
                 autocomplete="new-password"
                 @keyup-enter="nextStep"
               />
+            </label>
+
+            <label class="field">
+              <span>JWT 密钥（可选）</span>
+              <MiuixInput v-model="form.jwtSecret" placeholder="留空则自动生成" />
+              <small>用于会话认证，留空则自动生成随机密钥（建议）。</small>
             </label>
           </div>
         </div>
