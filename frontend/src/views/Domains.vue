@@ -425,10 +425,15 @@ async function generateDkim(domain) {
   generatingId.value = domain.id
   try {
     const data = await api.generateDkim(domain.id)
-    await loadDomains()
 
-    const updatedDomain =
-      data.domain || domains.value.find((item) => item.id === domain.id) || domain
+    if (data.domain) {
+      const index = domains.value.findIndex(d => d.id === domain.id)
+      if (index !== -1) {
+        domains.value[index] = data.domain
+      }
+    }
+
+    const updatedDomain = data.domain || domain
     const selector = data.selector || dkimSelector(updatedDomain)
     const fingerprint = publicKeyFingerprint(updatedDomain.dkim_public_key)
     message.value = fingerprint
